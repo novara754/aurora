@@ -33,6 +33,7 @@ int main()
         if (!engine.init())
         {
             spdlog::error("main: failed to initialize engine");
+            engine.release();
         }
         else
         {

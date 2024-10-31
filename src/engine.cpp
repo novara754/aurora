@@ -3,10 +3,24 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_vulkan.h>
 
+#include <limits>
 #include <spdlog/spdlog.h>
 
 #include <VkBootstrap.h>
 #include <vulkan/vulkan_core.h>
+
+#define VKERR(x, msg)                                                                              \
+    if (VkResult result = (x); result != VK_SUCCESS)                                               \
+    {                                                                                              \
+        spdlog::error(msg ": result = {}", static_cast<int>(result));                              \
+        return false;                                                                              \
+    }
+
+VkImageSubresourceRange full_image_range(VkImageAspectFlags aspect_mask);
+
+void transition_image(
+    VkCommandBuffer cmd_buffer, VkImage image, VkImageLayout src_layout, VkImageLayout dst_layout
+);
 
 bool Engine::init()
 {
@@ -111,11 +125,78 @@ bool Engine::init()
         vkb_swapchain.image_count
     );
 
+    auto graphics_queue_ret = vkb_device.get_queue(vkb::QueueType::graphics);
+    if (!graphics_queue_ret)
+    {
+        spdlog::error(
+            "Engine::init: failed to get vulkan graphics queue: {}",
+            graphics_queue_ret.error().message()
+        );
+        return false;
+    }
+    m_graphics_queue = graphics_queue_ret.value();
+    m_graphics_queue_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
+    spdlog::trace("Engine::init: acquired graphics queue");
+
+    for (auto &frame : m_frames)
+    {
+        VkCommandPoolCreateInfo cmd_pool_info = {};
+        cmd_pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cmd_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        cmd_pool_info.queueFamilyIndex = m_graphics_queue_family;
+
+        VKERR(
+            vkCreateCommandPool(m_device, &cmd_pool_info, nullptr, &frame.cmd_pool),
+            "Engine::init: failed to create frame command pool"
+        );
+
+        VkCommandBufferAllocateInfo cmd_buffer_info = {};
+        cmd_buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_buffer_info.commandPool = frame.cmd_pool;
+        cmd_buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_buffer_info.commandBufferCount = 1;
+
+        VKERR(
+            vkAllocateCommandBuffers(m_device, &cmd_buffer_info, &frame.cmd_buffer),
+            "Engine::init: failed to create frame command buffer"
+        );
+
+        VkSemaphoreCreateInfo semaphore_info = {};
+        semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VKERR(
+            vkCreateSemaphore(m_device, &semaphore_info, nullptr, &frame.present_semaphore),
+            "Engine::init: failed to create frame present semaphore"
+        );
+        VKERR(
+            vkCreateSemaphore(m_device, &semaphore_info, nullptr, &frame.render_semaphore),
+            "Engine::init: failed to create frame render semaphore"
+        );
+
+        VkFenceCreateInfo fence_info = {};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        VKERR(
+            vkCreateFence(m_device, &fence_info, nullptr, &frame.fence),
+            "Engine::init: failed to create frame fence"
+        );
+    }
+    spdlog::trace("Engine::init: created per-frame objects");
+
     return true;
 }
 
 void Engine::release()
 {
+    vkDeviceWaitIdle(m_device);
+
+    for (const auto &frame : m_frames)
+    {
+        vkDestroySemaphore(m_device, frame.render_semaphore, nullptr);
+        vkDestroySemaphore(m_device, frame.present_semaphore, nullptr);
+        vkDestroyFence(m_device, frame.fence, nullptr);
+        vkFreeCommandBuffers(m_device, frame.cmd_pool, 1, &frame.cmd_buffer);
+        vkDestroyCommandPool(m_device, frame.cmd_pool, nullptr);
+    }
     for (const auto view : m_swapchain_image_views)
     {
         vkDestroyImageView(m_device, view, nullptr);
@@ -132,6 +213,115 @@ void Engine::release()
     spdlog::trace("Engine::release: destroyed vulkan instance");
 }
 
+[[nodiscard]] bool Engine::render_frame()
+{
+    FrameData &frame = m_frames[m_frame_idx];
+    m_frame_idx = (m_frame_idx + 1) % NUM_FRAMES_IN_FLIGHT;
+
+    VKERR(
+        vkWaitForFences(m_device, 1, &frame.fence, VK_TRUE, std::numeric_limits<uint64_t>::max()),
+        "Engine::render_frame: failed to wait on frame fence"
+    );
+    VKERR(
+        vkResetFences(m_device, 1, &frame.fence),
+        "Engine::render_frame: failed to reset frame fence"
+    );
+
+    uint32_t image_idx;
+    VKERR(
+        vkAcquireNextImageKHR(
+            m_device,
+            m_swapchain,
+            std::numeric_limits<uint64_t>::max(),
+            frame.render_semaphore,
+            VK_NULL_HANDLE,
+            &image_idx
+        ),
+        "Engine::render_frame: failed to acquire next swapchain image"
+    );
+
+    VKERR(
+        vkResetCommandBuffer(frame.cmd_buffer, 0),
+        "Engine::render_frame: failed to reset command buffer"
+    );
+
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VKERR(
+        vkBeginCommandBuffer(frame.cmd_buffer, &begin_info),
+        "Engine::render_frame: failed to begin command buffer"
+    );
+    VkClearColorValue clear_color{
+        .float32 = {0.5f, 1.0f, 0.2f, 1.0f},
+    };
+    transition_image(
+        frame.cmd_buffer,
+        m_swapchain_images[image_idx],
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL
+    );
+    VkImageSubresourceRange clear_range = full_image_range(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(
+        frame.cmd_buffer,
+        m_swapchain_images[image_idx],
+        VK_IMAGE_LAYOUT_GENERAL,
+        &clear_color,
+        1,
+        &clear_range
+    );
+    transition_image(
+        frame.cmd_buffer,
+        m_swapchain_images[image_idx],
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+    );
+    VKERR(
+        vkEndCommandBuffer(frame.cmd_buffer),
+        "Engine::render_frame: failed to end command buffer"
+    );
+
+    VkCommandBufferSubmitInfo cmd_buffer_submit_info = {};
+    cmd_buffer_submit_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmd_buffer_submit_info.commandBuffer = frame.cmd_buffer;
+
+    VkSemaphoreSubmitInfo render_semaphore_submit_info = {};
+    render_semaphore_submit_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    render_semaphore_submit_info.semaphore = frame.render_semaphore;
+    render_semaphore_submit_info.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR;
+
+    VkSemaphoreSubmitInfo present_semaphore_submit_info = {};
+    present_semaphore_submit_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    present_semaphore_submit_info.semaphore = frame.present_semaphore;
+    present_semaphore_submit_info.stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+
+    VkSubmitInfo2 submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit_info.waitSemaphoreInfoCount = 1;
+    submit_info.pWaitSemaphoreInfos = &render_semaphore_submit_info;
+    submit_info.commandBufferInfoCount = 1;
+    submit_info.pCommandBufferInfos = &cmd_buffer_submit_info;
+    submit_info.signalSemaphoreInfoCount = 1;
+    submit_info.pSignalSemaphoreInfos = &present_semaphore_submit_info;
+    VKERR(
+        vkQueueSubmit2(m_graphics_queue, 1, &submit_info, frame.fence),
+        "Engine::render_frame: failed to submit render commands"
+    );
+
+    VkPresentInfoKHR present_info = {};
+    present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present_info.waitSemaphoreCount = 1;
+    present_info.pWaitSemaphores = &frame.present_semaphore;
+    present_info.swapchainCount = 1;
+    present_info.pSwapchains = &m_swapchain;
+    present_info.pImageIndices = &image_idx;
+    VKERR(
+        vkQueuePresentKHR(m_graphics_queue, &present_info),
+        "Engine::render_frame: failed to present"
+    );
+
+    return true;
+}
+
 void Engine::run()
 {
     spdlog::trace("Engine::run: entering main loop");
@@ -142,8 +332,15 @@ void Engine::run()
         {
             if (event.type == SDL_EVENT_QUIT)
             {
+                spdlog::trace("Engine::run: got quit event");
                 return;
             }
+        }
+
+        if (!render_frame())
+        {
+            spdlog::error("Engine::run: failed to render frame");
+            return;
         }
     }
     spdlog::trace("Engine::run: exitted main loop");
@@ -189,4 +386,42 @@ VkBool32 Engine::debug_message_callback(
     }
 
     return VK_FALSE;
+}
+
+void transition_image(
+    VkCommandBuffer cmd_buffer, VkImage image, VkImageLayout src_layout, VkImageLayout dst_layout
+)
+{
+    VkImageAspectFlags aspect_mask = (src_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+                                         ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                         : VK_IMAGE_ASPECT_COLOR_BIT;
+
+    VkImageMemoryBarrier2 image_barrier = {};
+    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    image_barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    image_barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    image_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    image_barrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+    image_barrier.oldLayout = src_layout;
+    image_barrier.newLayout = dst_layout;
+    image_barrier.image = image;
+    image_barrier.subresourceRange = full_image_range(aspect_mask);
+
+    VkDependencyInfo dep_info = {};
+    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep_info.imageMemoryBarrierCount = 1;
+    dep_info.pImageMemoryBarriers = &image_barrier;
+
+    vkCmdPipelineBarrier2(cmd_buffer, &dep_info);
+}
+
+VkImageSubresourceRange full_image_range(VkImageAspectFlags aspect_mask)
+{
+    return VkImageSubresourceRange{
+        .aspectMask = aspect_mask,
+        .baseMipLevel = 0,
+        .levelCount = VK_REMAINING_MIP_LEVELS,
+        .baseArrayLayer = 0,
+        .layerCount = VK_REMAINING_ARRAY_LAYERS,
+    };
 }
