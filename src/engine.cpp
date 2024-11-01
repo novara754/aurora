@@ -9,17 +9,17 @@
 #include <VkBootstrap.h>
 #include <vulkan/vulkan_core.h>
 
-#define VKERR(x, msg)                                                                              \
-    if (VkResult result = (x); result != VK_SUCCESS)                                               \
-    {                                                                                              \
-        spdlog::error(msg ": result = {}", static_cast<int>(result));                              \
-        return false;                                                                              \
-    }
+#include "vkerr.hpp"
 
 VkImageSubresourceRange full_image_range(VkImageAspectFlags aspect_mask);
 
 void transition_image(
     VkCommandBuffer cmd_buffer, VkImage image, VkImageLayout src_layout, VkImageLayout dst_layout
+);
+
+void blit_image(
+    VkCommandBuffer cmd_buffer, VkImage src_image, VkExtent3D src_extent, VkImage dst_image,
+    VkExtent3D dst_extent
 );
 
 bool Engine::init()
@@ -97,33 +97,21 @@ bool Engine::init()
     m_device = vkb_device.device;
     spdlog::trace("Engine::init: selected vulkan device");
 
-    vkb::SwapchainBuilder swapchain_builder(m_physical_device, m_device, m_surface);
-    auto swapchain_ret =
-        swapchain_builder.add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT).build();
-    if (!swapchain_ret)
+    VmaAllocatorCreateInfo vma_info = {};
+    vma_info.physicalDevice = m_physical_device;
+    vma_info.device = m_device;
+    vma_info.instance = m_instance;
+    vma_info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    vmaCreateAllocator(&vma_info, &m_allocator);
+
+    m_deletion_queue.add([&]() { vmaDestroyAllocator(m_allocator); });
+
+    if (!init_swapchain())
     {
-        spdlog::error(
-            "Engine::init: failed to create vulkan swapchain: {}",
-            swapchain_ret.error().message()
-        );
+        spdlog::error("Engine::init: failed to initialize swapchain");
         return false;
     }
-    vkb::Swapchain vkb_swapchain = swapchain_ret.value();
-    m_swapchain_format = vkb_swapchain.image_format;
-    m_swapchain_extent = vkb_swapchain.extent;
-    m_swapchain = vkb_swapchain.swapchain;
-    m_swapchain_images = vkb_swapchain.get_images().value();
-    m_swapchain_image_views = vkb_swapchain.get_image_views().value();
-    spdlog::trace("Engine::init: created vulkan swapchain");
-    spdlog::info(
-        "Engine::init: swapchain: format = {}, present_mode = {}, extent = ({}, {}), image_count = "
-        "{}",
-        static_cast<int>(vkb_swapchain.image_format),
-        static_cast<int>(vkb_swapchain.present_mode),
-        vkb_swapchain.extent.width,
-        vkb_swapchain.extent.width,
-        vkb_swapchain.image_count
-    );
+    spdlog::trace("Engine::init: initialized swapchain");
 
     auto graphics_queue_ret = vkb_device.get_queue(vkb::QueueType::graphics);
     if (!graphics_queue_ret)
@@ -185,18 +173,78 @@ bool Engine::init()
     return true;
 }
 
+bool Engine::init_swapchain()
+{
+    vkb::SwapchainBuilder swapchain_builder(m_physical_device, m_device, m_surface);
+    auto swapchain_ret =
+        swapchain_builder.add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT).build();
+    if (!swapchain_ret)
+    {
+        spdlog::error(
+            "Engine::init_swapchain: failed to create vulkan swapchain: {}",
+            swapchain_ret.error().message()
+        );
+        return false;
+    }
+    vkb::Swapchain vkb_swapchain = swapchain_ret.value();
+    m_swapchain_format = vkb_swapchain.image_format;
+    m_swapchain_extent = vkb_swapchain.extent;
+    m_swapchain = vkb_swapchain.swapchain;
+    m_swapchain_images = vkb_swapchain.get_images().value();
+    m_swapchain_image_views = vkb_swapchain.get_image_views().value();
+    spdlog::trace("Engine::init_swapchain: created vulkan swapchain");
+    spdlog::info(
+        "Engine::init_swapchain: swapchain: format = {}, present_mode = {}, extent = ({}, {}), "
+        "image_count = {}",
+        static_cast<int>(vkb_swapchain.image_format),
+        static_cast<int>(vkb_swapchain.present_mode),
+        vkb_swapchain.extent.width,
+        vkb_swapchain.extent.height,
+        vkb_swapchain.image_count
+    );
+
+    VkImageUsageFlags render_target_usage =
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    m_deletion_queue.add([&] { m_render_target.release(m_device, m_allocator); });
+    if (!m_render_target.allocate(
+            m_device,
+            m_allocator,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VkExtent3D{
+                .width = m_swapchain_extent.width,
+                .height = m_swapchain_extent.height,
+                .depth = 1,
+            },
+            render_target_usage,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        ))
+    {
+        spdlog::error("Engine::init_swapchain: failed to allocate render target image");
+        return false;
+    }
+
+    return true;
+}
+
 void Engine::release()
 {
     vkDeviceWaitIdle(m_device);
 
-    for (const auto &frame : m_frames)
+    for (auto &frame : m_frames)
     {
         vkDestroySemaphore(m_device, frame.render_semaphore, nullptr);
         vkDestroySemaphore(m_device, frame.present_semaphore, nullptr);
         vkDestroyFence(m_device, frame.fence, nullptr);
         vkFreeCommandBuffers(m_device, frame.cmd_pool, 1, &frame.cmd_buffer);
         vkDestroyCommandPool(m_device, frame.cmd_pool, nullptr);
+
+        frame.deletion_queue.delete_all();
     }
+
+    m_deletion_queue.delete_all();
+
     for (const auto view : m_swapchain_image_views)
     {
         vkDestroyImageView(m_device, view, nullptr);
@@ -213,6 +261,29 @@ void Engine::release()
     spdlog::trace("Engine::release: destroyed vulkan instance");
 }
 
+void Engine::draw_frame(VkCommandBuffer cmd_buffer)
+{
+    transition_image(
+        cmd_buffer,
+        m_render_target.image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL
+    );
+
+    VkClearColorValue clear_color{
+        .float32 = {0.5f, 1.0f, 0.2f, 1.0f},
+    };
+    VkImageSubresourceRange clear_range = full_image_range(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(
+        cmd_buffer,
+        m_render_target.image,
+        VK_IMAGE_LAYOUT_GENERAL,
+        &clear_color,
+        1,
+        &clear_range
+    );
+}
+
 [[nodiscard]] bool Engine::render_frame()
 {
     FrameData &frame = m_frames[m_frame_idx];
@@ -226,6 +297,8 @@ void Engine::release()
         vkResetFences(m_device, 1, &frame.fence),
         "Engine::render_frame: failed to reset frame fence"
     );
+
+    frame.deletion_queue.delete_all();
 
     uint32_t image_idx;
     VKERR(
@@ -251,30 +324,39 @@ void Engine::release()
         vkBeginCommandBuffer(frame.cmd_buffer, &begin_info),
         "Engine::render_frame: failed to begin command buffer"
     );
-    VkClearColorValue clear_color{
-        .float32 = {0.5f, 1.0f, 0.2f, 1.0f},
-    };
-    transition_image(
-        frame.cmd_buffer,
-        m_swapchain_images[image_idx],
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL
-    );
-    VkImageSubresourceRange clear_range = full_image_range(VK_IMAGE_ASPECT_COLOR_BIT);
-    vkCmdClearColorImage(
-        frame.cmd_buffer,
-        m_swapchain_images[image_idx],
-        VK_IMAGE_LAYOUT_GENERAL,
-        &clear_color,
-        1,
-        &clear_range
-    );
-    transition_image(
-        frame.cmd_buffer,
-        m_swapchain_images[image_idx],
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-    );
+    {
+        draw_frame(frame.cmd_buffer);
+
+        transition_image(
+            frame.cmd_buffer,
+            m_render_target.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+        );
+        transition_image(
+            frame.cmd_buffer,
+            m_swapchain_images[image_idx],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        );
+        blit_image(
+            frame.cmd_buffer,
+            m_render_target.image,
+            m_render_target.extent,
+            m_swapchain_images[image_idx],
+            VkExtent3D{
+                .width = m_swapchain_extent.width,
+                .height = m_swapchain_extent.height,
+                .depth = 1,
+            }
+        );
+        transition_image(
+            frame.cmd_buffer,
+            m_swapchain_images[image_idx],
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        );
+    }
     VKERR(
         vkEndCommandBuffer(frame.cmd_buffer),
         "Engine::render_frame: failed to end command buffer"
@@ -424,4 +506,49 @@ VkImageSubresourceRange full_image_range(VkImageAspectFlags aspect_mask)
         .baseArrayLayer = 0,
         .layerCount = VK_REMAINING_ARRAY_LAYERS,
     };
+}
+
+void blit_image(
+    VkCommandBuffer cmd_buffer, VkImage src_image, VkExtent3D src_extent, VkImage dst_image,
+    VkExtent3D dst_extent
+)
+{
+    VkImageBlit2 blit = {};
+    blit.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2;
+    blit.srcSubresource = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .mipLevel = 0,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    // blit.srcOffsets[0] is zeroed
+    blit.srcOffsets[1] = {
+        .x = static_cast<int32_t>(src_extent.width),
+        .y = static_cast<int32_t>(src_extent.height),
+        .z = 1,
+    };
+    blit.dstSubresource = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .mipLevel = 0,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    // blit.dstOffsets[0] is zeroed
+    blit.dstOffsets[1] = {
+        .x = static_cast<int32_t>(dst_extent.width),
+        .y = static_cast<int32_t>(dst_extent.height),
+        .z = 1,
+    };
+
+    VkBlitImageInfo2 blit_info = {};
+    blit_info.sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2;
+    blit_info.srcImage = src_image;
+    blit_info.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    blit_info.dstImage = dst_image;
+    blit_info.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    blit_info.regionCount = 1;
+    blit_info.pRegions = &blit;
+    blit_info.filter = VK_FILTER_LINEAR;
+
+    vkCmdBlitImage2(cmd_buffer, &blit_info);
 }
