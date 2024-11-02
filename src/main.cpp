@@ -33,18 +33,13 @@ int main()
         if (!engine.init())
         {
             spdlog::error("main: failed to initialize engine");
-            engine.release();
         }
         else
         {
             spdlog::trace("main: initialized engine");
-
             spdlog::trace("main: running engine");
             engine.run();
             spdlog::trace("main: engine has exitted");
-
-            engine.release();
-            spdlog::trace("main: engine has finished cleanup");
         }
     }
     catch (const std::exception &e)

@@ -47,6 +47,10 @@ bool Engine::init()
     vkb::Instance vkb_instance = instance_builder_ret.value();
     m_instance = vkb_instance.instance;
     m_debug_messenger = vkb_instance.debug_messenger;
+    m_deletion_queue.add([&] {
+        vkb::destroy_debug_utils_messenger(m_instance, m_debug_messenger, nullptr);
+        vkDestroyInstance(m_instance, nullptr);
+    });
     spdlog::trace("Engine::init: created vulkan instance");
 
     if (!SDL_Vulkan_CreateSurface(m_window, vkb_instance.instance, nullptr, &m_surface))
@@ -54,6 +58,7 @@ bool Engine::init()
         spdlog::error("Engine::init: failed to create surface from sdl window: {}", SDL_GetError());
         return false;
     }
+    m_deletion_queue.add([&] { vkDestroySurfaceKHR(m_instance, m_surface, nullptr); });
     spdlog::trace("Engine::init: created vulkan surface from sdl window");
 
     VkPhysicalDeviceVulkan13Features features_1_3 = {};
@@ -97,6 +102,7 @@ bool Engine::init()
     }
     vkb::Device vkb_device = device_ret.value();
     m_device = vkb_device.device;
+    m_deletion_queue.add([&] { vkDestroyDevice(m_device, nullptr); });
     spdlog::trace("Engine::init: selected vulkan device");
 
     VmaAllocatorCreateInfo vma_info = {};
@@ -105,8 +111,8 @@ bool Engine::init()
     vma_info.instance = m_instance;
     vma_info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     vmaCreateAllocator(&vma_info, &m_allocator);
-
     m_deletion_queue.add([&]() { vmaDestroyAllocator(m_allocator); });
+    spdlog::trace("Engine::init: created vma allocator");
 
     if (!init_swapchain())
     {
@@ -140,22 +146,24 @@ bool Engine::init()
         cmd_pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         cmd_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         cmd_pool_info.queueFamilyIndex = m_graphics_queue_family;
-
         VKERR(
             vkCreateCommandPool(m_device, &cmd_pool_info, nullptr, &frame.cmd_pool),
             "Engine::init: failed to create frame command pool"
         );
+        m_deletion_queue.add([&] { vkDestroyCommandPool(m_device, frame.cmd_pool, nullptr); });
 
         VkCommandBufferAllocateInfo cmd_buffer_info = {};
         cmd_buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         cmd_buffer_info.commandPool = frame.cmd_pool;
         cmd_buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cmd_buffer_info.commandBufferCount = 1;
-
         VKERR(
             vkAllocateCommandBuffers(m_device, &cmd_buffer_info, &frame.cmd_buffer),
             "Engine::init: failed to create frame command buffer"
         );
+        m_deletion_queue.add([&] {
+            vkFreeCommandBuffers(m_device, frame.cmd_pool, 1, &frame.cmd_buffer);
+        });
 
         VkSemaphoreCreateInfo semaphore_info = {};
         semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -163,9 +171,13 @@ bool Engine::init()
             vkCreateSemaphore(m_device, &semaphore_info, nullptr, &frame.present_semaphore),
             "Engine::init: failed to create frame present semaphore"
         );
+        m_deletion_queue.add([&] { vkDestroySemaphore(m_device, frame.present_semaphore, nullptr); }
+        );
         VKERR(
             vkCreateSemaphore(m_device, &semaphore_info, nullptr, &frame.render_semaphore),
             "Engine::init: failed to create frame render semaphore"
+        );
+        m_deletion_queue.add([&] { vkDestroySemaphore(m_device, frame.render_semaphore, nullptr); }
         );
 
         VkFenceCreateInfo fence_info = {};
@@ -175,6 +187,7 @@ bool Engine::init()
             vkCreateFence(m_device, &fence_info, nullptr, &frame.fence),
             "Engine::init: failed to create frame fence"
         );
+        m_deletion_queue.add([&] { vkDestroyFence(m_device, frame.fence, nullptr); });
     }
     spdlog::trace("Engine::init: created per-frame objects");
 
@@ -200,6 +213,13 @@ bool Engine::init_swapchain()
     m_swapchain = vkb_swapchain.swapchain;
     m_swapchain_images = vkb_swapchain.get_images().value();
     m_swapchain_image_views = vkb_swapchain.get_image_views().value();
+    m_deletion_queue.add([&] {
+        for (const auto view : m_swapchain_image_views)
+        {
+            vkDestroyImageView(m_device, view, nullptr);
+        }
+        vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
+    });
     spdlog::trace("Engine::init_swapchain: created vulkan swapchain");
     spdlog::info(
         "Engine::init_swapchain: swapchain: format = {}, present_mode = {}, extent = ({}, {}), "
@@ -251,7 +271,6 @@ bool Engine::init_swapchain()
     );
     m_deletion_queue.add([this, gradient_shader] {
         vkDestroyShaderModule(m_device, gradient_shader, nullptr);
-        spdlog::trace("Engine::m_deletion_queue: destroyed gradient shader module");
     });
     spdlog::trace("Engine::init_pipeline: created gradient shader module");
 
@@ -273,7 +292,6 @@ bool Engine::init_swapchain()
     );
     m_deletion_queue.add([this, set_layout] {
         vkDestroyDescriptorSetLayout(m_device, set_layout, nullptr);
-        spdlog::trace("Engine::m_deletion_queue: destroyed gradient descriptor set layout");
     });
     spdlog::trace("Engine::init_pipeline: created descriptor set layout");
 
@@ -359,37 +377,16 @@ bool Engine::init_swapchain()
     return true;
 }
 
-void Engine::release()
+Engine::~Engine()
 {
     vkDeviceWaitIdle(m_device);
 
     for (auto &frame : m_frames)
     {
-        vkDestroySemaphore(m_device, frame.render_semaphore, nullptr);
-        vkDestroySemaphore(m_device, frame.present_semaphore, nullptr);
-        vkDestroyFence(m_device, frame.fence, nullptr);
-        vkFreeCommandBuffers(m_device, frame.cmd_pool, 1, &frame.cmd_buffer);
-        vkDestroyCommandPool(m_device, frame.cmd_pool, nullptr);
-
         frame.deletion_queue.delete_all();
     }
 
     m_deletion_queue.delete_all();
-
-    for (const auto view : m_swapchain_image_views)
-    {
-        vkDestroyImageView(m_device, view, nullptr);
-    }
-    vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
-    spdlog::trace("Engine::release: destroyed vulkan swapchain");
-    vkDestroyDevice(m_device, nullptr);
-    spdlog::trace("Engine::release: destroyed vulkan device");
-    vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
-    spdlog::trace("Engine::release: destroyed vulkan surface");
-    vkb::destroy_debug_utils_messenger(m_instance, m_debug_messenger);
-    spdlog::trace("Engine::release: destroyed vulkan debug messenger");
-    vkDestroyInstance(m_instance, nullptr);
-    spdlog::trace("Engine::release: destroyed vulkan instance");
 }
 
 void Engine::draw_frame(VkCommandBuffer cmd_buffer)

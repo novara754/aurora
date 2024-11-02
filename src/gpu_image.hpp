@@ -72,7 +72,5 @@ struct GPUImage
     {
         vkDestroyImageView(device, this->view, nullptr);
         vmaDestroyImage(allocator, this->image, this->allocation);
-        // vkDestroyImage(device, this->image, nullptr);
-        // vmaFreeMemory(allocator, this->allocation);
     }
 };

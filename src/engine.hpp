@@ -92,8 +92,9 @@ class Engine
     {
     }
 
+    ~Engine();
+
     [[nodiscard]] bool init();
-    void release();
     void run();
 
   private:
