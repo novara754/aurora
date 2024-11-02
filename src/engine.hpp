@@ -100,6 +100,8 @@ class Engine
   private:
     [[nodiscard]] bool init_swapchain();
     [[nodiscard]] bool init_pipeline();
+    [[nodiscard]] bool init_imgui();
     void draw_frame(VkCommandBuffer cmd_buffer);
+    void draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_view);
     [[nodiscard]] bool render_frame();
 };

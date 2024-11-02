@@ -1,5 +1,6 @@
 #include "engine.hpp"
 
+#include <array>
 #include <limits>
 
 #include <SDL3/SDL_events.h>
@@ -9,6 +10,10 @@
 
 #include <VkBootstrap.h>
 #include <vulkan/vulkan_core.h>
+
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
 
 #include "read_file.hpp"
 #include "vkerr.hpp"
@@ -190,6 +195,12 @@ bool Engine::init()
         m_deletion_queue.add([&] { vkDestroyFence(m_device, frame.fence, nullptr); });
     }
     spdlog::trace("Engine::init: created per-frame objects");
+
+    if (!init_imgui())
+    {
+        spdlog::error("Engine::init: failed to initialize ImGui");
+        return false;
+    }
 
     return true;
 }
@@ -377,6 +388,64 @@ bool Engine::init_swapchain()
     return true;
 }
 
+[[nodiscard]] bool Engine::init_imgui()
+{
+    std::array pool_sizes = {
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000}
+    };
+
+    VkDescriptorPool descriptor_pool;
+    VkDescriptorPoolCreateInfo pool_info = {};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pool_info.maxSets = 1000;
+    pool_info.poolSizeCount = pool_sizes.size();
+    pool_info.pPoolSizes = pool_sizes.data();
+    VKERR(
+        vkCreateDescriptorPool(m_device, &pool_info, nullptr, &descriptor_pool),
+        "Engine::init_imgui: failed to create imgui descriptor pool"
+    );
+
+    ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+
+    ImGui_ImplSDL3_InitForVulkan(m_window);
+    ImGui_ImplVulkan_InitInfo init_info = {};
+    init_info.Instance = m_instance;
+    init_info.PhysicalDevice = m_physical_device;
+    init_info.Device = m_device;
+    init_info.QueueFamily = m_graphics_queue_family;
+    init_info.Queue = m_graphics_queue;
+    init_info.DescriptorPool = descriptor_pool;
+    init_info.MinImageCount = 2;
+    init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    init_info.ImageCount = 2;
+    init_info.UseDynamicRendering = true;
+    init_info.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &m_swapchain_format;
+
+    ImGui_ImplVulkan_Init(&init_info);
+    ImGui_ImplVulkan_CreateFontsTexture();
+
+    m_deletion_queue.add([this, descriptor_pool] {
+        ImGui_ImplVulkan_Shutdown();
+        vkDestroyDescriptorPool(m_device, descriptor_pool, nullptr);
+    });
+
+    return true;
+}
+
 Engine::~Engine()
 {
     vkDeviceWaitIdle(m_device);
@@ -398,18 +467,6 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         VK_IMAGE_LAYOUT_GENERAL
     );
 
-    // VkClearColorValue clear_color{
-    //     .float32 = {0.5f, 1.0f, 0.2f, 1.0f},
-    // };
-    // VkImageSubresourceRange clear_range = full_image_range(VK_IMAGE_ASPECT_COLOR_BIT);
-    // vkCmdClearColorImage(
-    //     cmd_buffer,
-    //     m_render_target.image,
-    //     VK_IMAGE_LAYOUT_GENERAL,
-    //     &clear_color,
-    //     1,
-    //     &clear_range
-    // );
     vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_gradient_pipeline);
     vkCmdBindDescriptorSets(
         cmd_buffer,
@@ -427,6 +484,29 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         (m_render_target.extent.height + 15) / 16,
         1
     );
+}
+
+void Engine::draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_view)
+{
+    VkRenderingAttachmentInfo color_attachment = {};
+    color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    color_attachment.imageView = swapchain_image_view;
+    color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo rendering_info = {};
+    rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering_info.renderArea.extent = m_swapchain_extent;
+    rendering_info.layerCount = 1;
+    rendering_info.colorAttachmentCount = 1;
+    rendering_info.pColorAttachments = &color_attachment;
+    vkCmdBeginRendering(cmd_buffer, &rendering_info);
+
+    ImDrawData *draw_data = ImGui::GetDrawData();
+    ImGui_ImplVulkan_RenderDrawData(draw_data, cmd_buffer);
+
+    vkCmdEndRendering(cmd_buffer);
 }
 
 [[nodiscard]] bool Engine::render_frame()
@@ -495,6 +575,9 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
                 .depth = 1,
             }
         );
+
+        draw_imgui(frame.cmd_buffer, m_swapchain_image_views[image_idx]);
+
         transition_image(
             frame.cmd_buffer,
             m_swapchain_images[image_idx],
@@ -562,7 +645,17 @@ void Engine::run()
                 spdlog::trace("Engine::run: got quit event");
                 return;
             }
+
+            ImGui_ImplSDL3_ProcessEvent(&event);
         }
+
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::ShowDemoWindow();
+
+        ImGui::Render();
 
         if (!render_frame())
         {

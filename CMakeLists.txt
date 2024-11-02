@@ -40,6 +40,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(vma)
 
+FetchContent_Declare(
+        imgui
+        SYSTEM
+        GIT_REPOSITORY "https://github.com/ocornut/imgui.git"
+        GIT_TAG "71c77c081ac36841e682498229088e7678207112"
+)
+FetchContent_MakeAvailable(imgui)
+
+
 find_package(Vulkan REQUIRED)
 find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
 
@@ -62,6 +71,22 @@ function(compile_shader target)
     endforeach()
 endfunction()
 
+add_library(imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+)
+target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
+target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(imgui PRIVATE SDL3::SDL3-static)
+target_link_libraries(imgui PRIVATE Vulkan::Vulkan)
+
 add_executable(aurora
         src/main.cpp
         src/engine.cpp
@@ -80,6 +105,7 @@ target_link_libraries(aurora PRIVATE SDL3::SDL3-static)
 target_link_libraries(aurora PRIVATE Vulkan::Vulkan)
 target_link_libraries(aurora PRIVATE vk-bootstrap::vk-bootstrap)
 target_link_libraries(aurora PRIVATE GPUOpen::VulkanMemoryAllocator)
+target_link_libraries(aurora PRIVATE imgui)
 
 compile_shader(aurora
     ENV vulkan1.3
