@@ -19,7 +19,8 @@ int main()
     }
     spdlog::trace("main: initialized sdl video and audio subsystem");
 
-    SDL_Window *window = SDL_CreateWindow("Aurora", 1280, 720, SDL_WINDOW_VULKAN);
+    SDL_Window *window =
+        SDL_CreateWindow("Aurora", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!window)
     {
         spdlog::error("main: failed to create window: {}", SDL_GetError());

@@ -76,6 +76,7 @@ class Engine
 
     VmaAllocator m_allocator;
 
+    uint64_t m_swapchain_generation{0};
     VkExtent2D m_swapchain_extent;
     VkFormat m_swapchain_format;
     VkSwapchainKHR m_swapchain{VK_NULL_HANDLE};
@@ -98,6 +99,8 @@ class Engine
         VkCommandBuffer cmd_buffer;
         VkFence fence;
     } m_immediate_commands;
+
+    bool m_disable_render{false};
 
     VkDescriptorPool m_descriptor_pool;
     VkDescriptorSet m_gradient_set;
@@ -133,6 +136,8 @@ class Engine
 
   private:
     [[nodiscard]] bool init_swapchain();
+    [[nodiscard]] bool refresh_swapchain();
+
     [[nodiscard]] bool init_gradient_pipeline();
     [[nodiscard]] bool init_triangle_pipeline();
     [[nodiscard]] bool init_imgui();

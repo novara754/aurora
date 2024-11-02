@@ -1,5 +1,6 @@
 #include "engine.hpp"
 
+#include <SDL3/SDL_timer.h>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -128,6 +129,28 @@ bool Engine::init()
         return false;
     }
     spdlog::trace("Engine::init: initialized swapchain");
+
+    VkImageUsageFlags render_target_usage =
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    m_deletion_queue.add([&] { m_render_target.release(m_device, m_allocator); });
+    if (!m_render_target.allocate(
+            m_device,
+            m_allocator,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VkExtent3D{
+                .width = m_swapchain_extent.width,
+                .height = m_swapchain_extent.height,
+                .depth = 1,
+            },
+            render_target_usage,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        ))
+    {
+        spdlog::error("Engine::init: failed to allocate render target image");
+        return false;
+    }
 
     auto graphics_queue_ret = vkb_device.get_queue(vkb::QueueType::graphics);
     if (!graphics_queue_ret)
@@ -290,12 +313,16 @@ bool Engine::init_swapchain()
     m_swapchain = vkb_swapchain.swapchain;
     m_swapchain_images = vkb_swapchain.get_images().value();
     m_swapchain_image_views = vkb_swapchain.get_image_views().value();
-    m_deletion_queue.add([&] {
-        for (const auto view : m_swapchain_image_views)
+    uint64_t this_generation = m_swapchain_generation;
+    m_deletion_queue.add([&, this_generation] {
+        if (m_swapchain_generation == this_generation)
         {
-            vkDestroyImageView(m_device, view, nullptr);
+            for (const auto view : m_swapchain_image_views)
+            {
+                vkDestroyImageView(m_device, view, nullptr);
+            }
+            vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
         }
-        vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
     });
     spdlog::trace("Engine::init_swapchain: created vulkan swapchain");
     spdlog::info(
@@ -308,29 +335,23 @@ bool Engine::init_swapchain()
         vkb_swapchain.image_count
     );
 
-    VkImageUsageFlags render_target_usage =
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    m_deletion_queue.add([&] { m_render_target.release(m_device, m_allocator); });
-    if (!m_render_target.allocate(
-            m_device,
-            m_allocator,
-            VMA_MEMORY_USAGE_GPU_ONLY,
-            VK_FORMAT_R16G16B16A16_SFLOAT,
-            VkExtent3D{
-                .width = m_swapchain_extent.width,
-                .height = m_swapchain_extent.height,
-                .depth = 1,
-            },
-            render_target_usage,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        ))
+    return true;
+}
+
+bool Engine::refresh_swapchain()
+{
+    vkDeviceWaitIdle(m_device);
+
+    for (const auto view : m_swapchain_image_views)
     {
-        spdlog::error("Engine::init_swapchain: failed to allocate render target image");
-        return false;
+        vkDestroyImageView(m_device, view, nullptr);
     }
 
-    return true;
+    vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
+
+    m_swapchain_generation += 1;
+
+    return init_swapchain();
 }
 
 [[nodiscard]] bool Engine::init_gradient_pipeline()
@@ -901,10 +922,16 @@ void Engine::draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_
     present_info.swapchainCount = 1;
     present_info.pSwapchains = &m_swapchain;
     present_info.pImageIndices = &image_idx;
-    VKERR(
-        vkQueuePresentKHR(m_graphics_queue, &present_info),
-        "Engine::render_frame: failed to present"
-    );
+
+    VkResult present_res = vkQueuePresentKHR(m_graphics_queue, &present_info);
+    if (present_res != VK_SUCCESS)
+    {
+        if (!refresh_swapchain())
+        {
+            spdlog::error("Engine::run: failed to recreate swapchain for resize");
+            return false;
+        }
+    }
 
     return true;
 }
@@ -935,8 +962,31 @@ void Engine::run()
                 spdlog::trace("Engine::run: got quit event");
                 return;
             }
+            else if (event.type == SDL_EVENT_WINDOW_RESIZED)
+            {
+                spdlog::trace("Engine::run: got resize event");
+                if (!refresh_swapchain())
+                {
+                    spdlog::error("Engine::run: failed to recreate swapchain for resize");
+                    break;
+                }
+            }
+            else if (event.type == SDL_EVENT_WINDOW_MINIMIZED)
+            {
+                m_disable_render = true;
+            }
+            else if (event.type == SDL_EVENT_WINDOW_RESTORED)
+            {
+                m_disable_render = false;
+            }
 
             ImGui_ImplSDL3_ProcessEvent(&event);
+        }
+
+        if (m_disable_render)
+        {
+            SDL_Delay(100);
+            continue;
         }
 
         ImGui_ImplVulkan_NewFrame();
