@@ -112,4 +112,6 @@ compile_shader(aurora
     FORMAT bin
     SOURCES
         shaders/gradient.comp
+        shaders/triangle.vert
+        shaders/triangle.frag
 )
