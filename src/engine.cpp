@@ -306,12 +306,17 @@ bool Engine::init_swapchain()
     });
     spdlog::trace("Engine::init_pipeline: created descriptor set layout");
 
+    VkPushConstantRange push_constant_range{
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0,
+        .size = sizeof(float) * 3,
+    };
     VkPipelineLayoutCreateInfo layout_info = {};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 1;
     layout_info.pSetLayouts = &set_layout;
-    layout_info.pushConstantRangeCount = 0;
-    layout_info.pPushConstantRanges = nullptr;
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &push_constant_range;
     VKERR(
         vkCreatePipelineLayout(m_device, &layout_info, nullptr, &m_gradient_pipeline_layout),
         "Engine::init_pipeline: failed to create pipeline layout"
@@ -467,6 +472,14 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         VK_IMAGE_LAYOUT_GENERAL
     );
 
+    vkCmdPushConstants(
+        cmd_buffer,
+        m_gradient_pipeline_layout,
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        0,
+        sizeof(m_color),
+        m_color.data()
+    );
     vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_gradient_pipeline);
     vkCmdBindDescriptorSets(
         cmd_buffer,
@@ -632,6 +645,19 @@ void Engine::draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_
     return true;
 }
 
+void Engine::build_ui()
+{
+    ImGui::Begin(
+        "Settings",
+        nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize
+    );
+    {
+        ImGui::ColorEdit3("Color", m_color.data());
+    }
+    ImGui::End();
+}
+
 void Engine::run()
 {
     spdlog::trace("Engine::run: entering main loop");
@@ -653,7 +679,7 @@ void Engine::run()
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::ShowDemoWindow();
+        build_ui();
 
         ImGui::Render();
 

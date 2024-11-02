@@ -76,6 +76,8 @@ class Engine
     VkPipelineLayout m_gradient_pipeline_layout;
     VkPipeline m_gradient_pipeline;
 
+    std::array<float, 3> m_color{1.0f, 0.5f, 0.1f};
+
     Engine(const Engine &) = delete;
     Engine &operator=(const Engine &) = delete;
     Engine(Engine &&) = delete;
@@ -104,4 +106,5 @@ class Engine
     void draw_frame(VkCommandBuffer cmd_buffer);
     void draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_view);
     [[nodiscard]] bool render_frame();
+    void build_ui();
 };
