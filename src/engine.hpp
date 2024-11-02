@@ -71,6 +71,11 @@ class Engine
 
     GPUImage m_render_target;
 
+    VkDescriptorPool m_descriptor_pool;
+    VkDescriptorSet m_gradient_set;
+    VkPipelineLayout m_gradient_pipeline_layout;
+    VkPipeline m_gradient_pipeline;
+
     Engine(const Engine &) = delete;
     Engine &operator=(const Engine &) = delete;
     Engine(Engine &&) = delete;
@@ -93,6 +98,7 @@ class Engine
 
   private:
     [[nodiscard]] bool init_swapchain();
+    [[nodiscard]] bool init_pipeline();
     void draw_frame(VkCommandBuffer cmd_buffer);
     [[nodiscard]] bool render_frame();
 };

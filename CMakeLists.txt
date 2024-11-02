@@ -41,11 +41,32 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(vma)
 
 find_package(Vulkan REQUIRED)
+find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
+
+function(compile_shader target)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "" "ENV;FORMAT" "SOURCES")
+    foreach(source ${arg_SOURCES})
+        add_custom_command(
+            OUTPUT ${source}.${arg_FORMAT}
+            DEPENDS ${source}
+            DEPFILE ${source}.d
+            COMMAND
+                ${glslc_executable}
+                --target-env=${arg_ENV}
+                -mfmt=${arg_FORMAT}
+                -MD -MF ${source}.d
+                -o ${source}.${arg_FORMAT}
+                ${CMAKE_CURRENT_SOURCE_DIR}/${source}
+        )
+        target_sources(${target} PRIVATE ${source}.${arg_FORMAT})
+    endforeach()
+endfunction()
 
 add_executable(aurora
         src/main.cpp
         src/engine.cpp
         src/vma_impl.cpp
+        src/read_file.cpp
 )
 target_compile_options(aurora PRIVATE
         -Wall
@@ -59,3 +80,10 @@ target_link_libraries(aurora PRIVATE SDL3::SDL3-static)
 target_link_libraries(aurora PRIVATE Vulkan::Vulkan)
 target_link_libraries(aurora PRIVATE vk-bootstrap::vk-bootstrap)
 target_link_libraries(aurora PRIVATE GPUOpen::VulkanMemoryAllocator)
+
+compile_shader(aurora
+    ENV vulkan1.3
+    FORMAT bin
+    SOURCES
+        shaders/gradient.comp
+)
