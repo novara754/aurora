@@ -1,6 +1,8 @@
 #include "engine.hpp"
 
 #include <array>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 
 #include <SDL3/SDL_events.h>
@@ -15,6 +17,7 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
 
+#include "gpu_buffer.hpp"
 #include "read_file.hpp"
 #include "vkerr.hpp"
 
@@ -201,6 +204,63 @@ bool Engine::init()
         m_deletion_queue.add([&] { vkDestroyFence(m_device, frame.fence, nullptr); });
     }
     spdlog::trace("Engine::init: created per-frame objects");
+
+    {
+        VkCommandPoolCreateInfo cmd_pool_info = {};
+        cmd_pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cmd_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        cmd_pool_info.queueFamilyIndex = m_graphics_queue_family;
+        VKERR(
+            vkCreateCommandPool(m_device, &cmd_pool_info, nullptr, &m_immediate_commands.cmd_pool),
+            "Engine::init: failed to create immediate submit command pool"
+        );
+        m_deletion_queue.add([&] {
+            vkDestroyCommandPool(m_device, m_immediate_commands.cmd_pool, nullptr);
+        });
+
+        VkCommandBufferAllocateInfo cmd_buffer_info = {};
+        cmd_buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_buffer_info.commandPool = m_immediate_commands.cmd_pool;
+        cmd_buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_buffer_info.commandBufferCount = 1;
+        VKERR(
+            vkAllocateCommandBuffers(m_device, &cmd_buffer_info, &m_immediate_commands.cmd_buffer),
+            "Engine::init: failed to allocate immediate submit command buffer"
+        );
+        m_deletion_queue.add([&] {
+            vkFreeCommandBuffers(
+                m_device,
+                m_immediate_commands.cmd_pool,
+                1,
+                &m_immediate_commands.cmd_buffer
+            );
+        });
+
+        VkFenceCreateInfo fence_info = {};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VKERR(
+            vkCreateFence(m_device, &fence_info, nullptr, &m_immediate_commands.fence),
+            "Engine::init: failed to create immediate submit fence"
+        );
+        m_deletion_queue.add([&] { vkDestroyFence(m_device, m_immediate_commands.fence, nullptr); }
+        );
+    }
+
+    {
+        std::array triangle{
+            Vertex{{0.0f, -0.5f, 0.0f}},
+            Vertex{{0.5f, 0.5f, 0.0f}},
+            Vertex{{-0.5f, 0.5f, 0.0f}},
+        };
+
+        if (!create_mesh(triangle, &m_triangle_mesh))
+        {
+            spdlog::error("Engine::init: failed to create triangle mesh");
+            return false;
+        }
+
+        m_deletion_queue.add([&] { destroy_mesh(&m_triangle_mesh); });
+    }
 
     if (!init_imgui())
     {
@@ -401,12 +461,17 @@ bool Engine::init_swapchain()
 
 [[nodiscard]] bool Engine::init_triangle_pipeline()
 {
+    VkPushConstantRange push_constant_range{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(TrianglePushConstants),
+    };
     VkPipelineLayoutCreateInfo layout_info = {};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 0;
     layout_info.pSetLayouts = nullptr;
-    layout_info.pushConstantRangeCount = 0;
-    layout_info.pPushConstantRanges = nullptr;
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &push_constant_range;
     VKERR(
         vkCreatePipelineLayout(m_device, &layout_info, nullptr, &m_triangle_pipeline_layout),
         "Engine::init_triangle_pipelie: failed to create pipeline layout"
@@ -678,9 +743,21 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
             },
     };
 
+    TrianglePushConstants push_constants{
+        .vertex_buffer_address = m_triangle_mesh.vertex_buffer_address,
+    };
+
     vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_triangle_pipeline);
     vkCmdSetViewport(cmd_buffer, 0, 1, &viewport);
     vkCmdSetScissor(cmd_buffer, 0, 1, &scissor);
+    vkCmdPushConstants(
+        cmd_buffer,
+        m_triangle_pipeline_layout,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(TrianglePushConstants),
+        &push_constants
+    );
     vkCmdDraw(cmd_buffer, 3, 1, 0, 0);
 
     vkCmdEndRendering(cmd_buffer);
@@ -877,6 +954,125 @@ void Engine::run()
         }
     }
     spdlog::trace("Engine::run: exitted main loop");
+}
+
+[[nodiscard]] bool Engine::immediate_submit(std::function<void(VkCommandBuffer)> f)
+{
+    VKERR(
+        vkResetCommandBuffer(m_immediate_commands.cmd_buffer, 0),
+        "Engine::immediate_submit: failed to reset command buffer"
+    );
+
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VKERR(
+        vkBeginCommandBuffer(m_immediate_commands.cmd_buffer, &begin_info),
+        "Engine::immediate_submit: failed to begin command buffer"
+    );
+
+    f(m_immediate_commands.cmd_buffer);
+
+    VKERR(
+        vkEndCommandBuffer(m_immediate_commands.cmd_buffer),
+        "Engine::immediate_submit: failed to end command buffer"
+    );
+
+    VkCommandBufferSubmitInfo cmd_buffer_info = {};
+    cmd_buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmd_buffer_info.commandBuffer = m_immediate_commands.cmd_buffer;
+
+    VkSubmitInfo2 submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit_info.commandBufferInfoCount = 1;
+    submit_info.pCommandBufferInfos = &cmd_buffer_info;
+    VKERR(
+        vkQueueSubmit2(m_graphics_queue, 1, &submit_info, m_immediate_commands.fence),
+        "Engine::immediate_submit: failed to submit command buffer"
+    );
+
+    VKERR(
+        vkWaitForFences(
+            m_device,
+            1,
+            &m_immediate_commands.fence,
+            VK_TRUE,
+            std::numeric_limits<uint64_t>::max()
+        ),
+        "Engine::immediate_submit: failed to wait for fence"
+    );
+
+    VKERR(
+        vkResetFences(m_device, 1, &m_immediate_commands.fence),
+        "Engine::immediate_submit: failed to reset fence"
+    );
+
+    return true;
+}
+
+[[nodiscard]] bool Engine::create_mesh(std::span<Vertex> vertices, Mesh *out_mesh)
+{
+    VkDeviceSize vertex_buffer_size = vertices.size() * sizeof(Vertex);
+
+    if (!out_mesh->vertex_buffer.allocate(
+            m_allocator,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            vertex_buffer_size,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+        ))
+    {
+        spdlog::error("Engine::create_mesh: failed to allocate vertex buffer");
+        return false;
+    }
+
+    GPUBuffer transfer_buffer;
+    if (!transfer_buffer.allocate(
+            m_allocator,
+            VMA_MEMORY_USAGE_CPU_TO_GPU,
+            vertex_buffer_size,
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+        ))
+    {
+        spdlog::error("Engine::create_mesh: failed to allocate transfer buffer");
+        return false;
+    }
+
+    std::memcpy(transfer_buffer.allocation_info.pMappedData, vertices.data(), vertex_buffer_size);
+
+    if (!immediate_submit([&](VkCommandBuffer cmd_buffer) {
+            VkBufferCopy copy_region{
+                .srcOffset = 0,
+                .dstOffset = 0,
+                .size = vertex_buffer_size,
+            };
+            vkCmdCopyBuffer(
+                cmd_buffer,
+                transfer_buffer.buffer,
+                out_mesh->vertex_buffer.buffer,
+                1,
+                &copy_region
+            );
+        }))
+    {
+        transfer_buffer.release(m_allocator);
+
+        spdlog::error("Engine::create_mesh: failed to copy data to vertex buffer");
+        return false;
+    }
+
+    VkBufferDeviceAddressInfo address_info = {};
+    address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    address_info.buffer = out_mesh->vertex_buffer.buffer;
+    out_mesh->vertex_buffer_address = vkGetBufferDeviceAddress(m_device, &address_info);
+
+    transfer_buffer.release(m_allocator);
+
+    return true;
+}
+
+void Engine::destroy_mesh(Mesh *out_mesh)
+{
+    out_mesh->vertex_buffer.release(m_allocator);
 }
 
 VkBool32 Engine::debug_message_callback(

@@ -2,13 +2,29 @@
 
 #include <array>
 #include <functional>
-#include <vector>
 
 #include <SDL3/SDL_video.h>
+
+#include <span>
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan_core.h>
 
+#include <glm/glm.hpp>
+
+#include "gpu_buffer.hpp"
 #include "gpu_image.hpp"
+
+struct Vertex
+{
+    glm::vec3 position;
+    float padding{0.0f};
+};
+
+struct Mesh
+{
+    GPUBuffer vertex_buffer;
+    VkDeviceAddress vertex_buffer_address;
+};
 
 class DeletionQueue
 {
@@ -41,6 +57,11 @@ struct FrameData
     DeletionQueue deletion_queue;
 };
 
+struct TrianglePushConstants
+{
+    VkDeviceAddress vertex_buffer_address;
+};
+
 class Engine
 {
     static constexpr size_t NUM_FRAMES_IN_FLIGHT = 2;
@@ -71,6 +92,13 @@ class Engine
 
     GPUImage m_render_target;
 
+    struct
+    {
+        VkCommandPool cmd_pool;
+        VkCommandBuffer cmd_buffer;
+        VkFence fence;
+    } m_immediate_commands;
+
     VkDescriptorPool m_descriptor_pool;
     VkDescriptorSet m_gradient_set;
     VkPipelineLayout m_gradient_pipeline_layout;
@@ -80,6 +108,7 @@ class Engine
     VkPipeline m_triangle_pipeline;
 
     std::array<float, 3> m_color{1.0f, 0.5f, 0.1f};
+    Mesh m_triangle_mesh;
 
     Engine(const Engine &) = delete;
     Engine &operator=(const Engine &) = delete;
@@ -111,4 +140,8 @@ class Engine
     void draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_view);
     [[nodiscard]] bool render_frame();
     void build_ui();
+    [[nodiscard]] bool immediate_submit(std::function<void(VkCommandBuffer)> f);
+
+    [[nodiscard]] bool create_mesh(std::span<Vertex> vertices, Mesh *out_mesh);
+    void destroy_mesh(Mesh *out_mesh);
 };

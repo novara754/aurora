@@ -48,6 +48,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+FetchContent_Declare(
+        glm
+        SYSTEM
+        GIT_REPOSITORY "https://github.com/g-truc/glm"
+        GIT_TAG "1.0.1"
+)
+FetchContent_MakeAvailable(glm)
 
 find_package(Vulkan REQUIRED)
 find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
@@ -106,6 +113,7 @@ target_link_libraries(aurora PRIVATE Vulkan::Vulkan)
 target_link_libraries(aurora PRIVATE vk-bootstrap::vk-bootstrap)
 target_link_libraries(aurora PRIVATE GPUOpen::VulkanMemoryAllocator)
 target_link_libraries(aurora PRIVATE imgui)
+target_link_libraries(aurora PRIVATE glm::glm)
 
 compile_shader(aurora
     ENV vulkan1.3
