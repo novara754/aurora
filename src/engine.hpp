@@ -2,13 +2,16 @@
 
 #include <array>
 #include <functional>
+#include <span>
+#include <string>
 
 #include <SDL3/SDL_video.h>
 
-#include <span>
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan_core.h>
 
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/ext/matrix_transform.hpp>
 #include <glm/glm.hpp>
 
 struct GPUBuffer
@@ -36,6 +39,7 @@ struct Vertex
 
 struct Mesh
 {
+    uint32_t index_count;
     GPUBuffer vertex_buffer;
     GPUBuffer index_buffer;
     VkDeviceAddress vertex_buffer_address;
@@ -72,9 +76,28 @@ struct FrameData
     DeletionQueue deletion_queue;
 };
 
-struct TrianglePushConstants
+struct ForwardPushConstants
 {
+    glm::mat4 camera;
     VkDeviceAddress vertex_buffer_address;
+};
+
+struct Camera
+{
+    glm::vec3 eye;
+    glm::vec3 forward;
+    glm::vec3 up;
+    float fov_y;
+    float aspect;
+    float z_near;
+    float z_far;
+
+    [[nodiscard]] glm::mat4 get_matrix() const
+    {
+        glm::mat4 view = glm::lookAtRH(this->eye, this->eye + this->forward, this->up);
+        glm::mat4 proj = glm::perspectiveRH(this->fov_y, this->aspect, this->z_near, this->z_far);
+        return proj * view;
+    }
 };
 
 class Engine
@@ -120,8 +143,20 @@ class Engine
     VkPipelineLayout m_forward_pipeline_layout;
     VkPipeline m_forward_pipeline;
 
+    Camera m_camera{
+        .eye = {0.0f, 0.0f, 10.0f},
+        .forward = {0.0f, 0.0f, -1.0f},
+        .up = {0.0f, 1.0f, 0.0f},
+        .fov_y = 70.0f,
+        .aspect = 16.0f / 9.0f,
+        .z_near = 0.1f,
+        .z_far = 1000.0f,
+    };
     std::array<float, 3> m_background_color{1.0f, 0.5f, 0.1f};
-    Mesh m_triangle_mesh;
+    Mesh m_cube_mesh;
+    Mesh m_lucy_mesh;
+    std::array<Mesh *, 2> m_meshes{&m_cube_mesh, &m_lucy_mesh};
+    int m_selected_mesh{0};
 
     Engine(const Engine &) = delete;
     Engine &operator=(const Engine &) = delete;
@@ -173,5 +208,6 @@ class Engine
 
     [[nodiscard]] bool
     create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mesh *out_mesh);
+    [[nodiscard]] bool create_mesh_from_obj(const std::string &path, Mesh *out_mesh);
     void destroy_mesh(Mesh *mesh);
 };

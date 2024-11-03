@@ -56,6 +56,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
+FetchContent_Declare(
+        tinyobjloader
+        SYSTEM
+        GIT_REPOSITORY "https://github.com/tinyobjloader/tinyobjloader"
+        GIT_TAG "release"
+)
+FetchContent_MakeAvailable(tinyobjloader)
+
 find_package(Vulkan REQUIRED)
 find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
 
@@ -97,8 +105,9 @@ target_link_libraries(imgui PRIVATE Vulkan::Vulkan)
 add_executable(aurora
         src/main.cpp
         src/engine.cpp
-        src/vma_impl.cpp
         src/read_file.cpp
+        src/vma_impl.cpp
+        src/tiny_obj_loader_impl.cpp
 )
 target_compile_options(aurora PRIVATE
         -Wall
@@ -114,6 +123,7 @@ target_link_libraries(aurora PRIVATE vk-bootstrap::vk-bootstrap)
 target_link_libraries(aurora PRIVATE GPUOpen::VulkanMemoryAllocator)
 target_link_libraries(aurora PRIVATE imgui)
 target_link_libraries(aurora PRIVATE glm::glm)
+target_link_libraries(aurora PRIVATE tinyobjloader)
 
 compile_shader(aurora
     ENV vulkan1.3
@@ -121,4 +131,9 @@ compile_shader(aurora
     SOURCES
         shaders/forward.vert
         shaders/forward.frag
+)
+
+add_custom_command(
+        TARGET aurora POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_LIST_DIR}/meshes" "${CMAKE_CURRENT_BINARY_DIR}/meshes"
 )

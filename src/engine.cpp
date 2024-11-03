@@ -1,12 +1,13 @@
 #include "engine.hpp"
 
-#include <SDL3/SDL_timer.h>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_vulkan.h>
 
 #include <spdlog/spdlog.h>
@@ -17,6 +18,10 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
+
+#include <tiny_obj_loader.h>
+
+#include <glm/gtc/type_ptr.hpp>
 
 #include "read_file.hpp"
 #include "vkerr.hpp"
@@ -263,21 +268,19 @@ bool Engine::init()
     }
 
     {
-        std::array vertices{
-            Vertex{{0.0f, -0.5f, 0.0f}},
-            Vertex{{0.5f, 0.5f, 0.0f}},
-            Vertex{{-0.5f, 0.5f, 0.0f}},
-        };
-
-        std::array<uint32_t, 3> indices{0, 1, 2};
-
-        if (!create_mesh(vertices, indices, &m_triangle_mesh))
+        if (!create_mesh_from_obj("../meshes/cube.obj", &m_cube_mesh))
         {
-            spdlog::error("Engine::init: failed to create triangle mesh");
+            spdlog::error("Engine::init: failed to create cube mesh");
             return false;
         }
+        m_deletion_queue.add([&] { destroy_mesh(&m_cube_mesh); });
 
-        m_deletion_queue.add([&] { destroy_mesh(&m_triangle_mesh); });
+        if (!create_mesh_from_obj("../meshes/lucy.obj", &m_lucy_mesh))
+        {
+            spdlog::error("Engine::init: failed to create lucy mesh");
+            return false;
+        }
+        m_deletion_queue.add([&] { destroy_mesh(&m_lucy_mesh); });
     }
 
     if (!init_imgui())
@@ -354,7 +357,7 @@ bool Engine::refresh_swapchain()
     VkPushConstantRange push_constant_range{
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
-        .size = sizeof(TrianglePushConstants),
+        .size = sizeof(ForwardPushConstants),
     };
     VkPipelineLayoutCreateInfo layout_info = {};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -603,10 +606,10 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
     vkCmdBeginRendering(cmd_buffer, &rendering_info);
 
     VkViewport viewport{
-        .x = 0,
-        .y = 0,
+        .x = 0.0f,
+        .y = static_cast<float>(m_render_target.extent.height),
         .width = static_cast<float>(m_render_target.extent.width),
-        .height = static_cast<float>(m_render_target.extent.height),
+        .height = -static_cast<float>(m_render_target.extent.height),
         .minDepth = 0.0f,
         .maxDepth = 1.0f,
     };
@@ -620,8 +623,11 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
             },
     };
 
-    TrianglePushConstants push_constants{
-        .vertex_buffer_address = m_triangle_mesh.vertex_buffer_address,
+    Mesh *mesh = m_meshes[m_selected_mesh];
+
+    ForwardPushConstants push_constants{
+        .camera = m_camera.get_matrix(),
+        .vertex_buffer_address = mesh->vertex_buffer_address,
     };
 
     vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_forward_pipeline);
@@ -632,11 +638,11 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         m_forward_pipeline_layout,
         VK_SHADER_STAGE_VERTEX_BIT,
         0,
-        sizeof(TrianglePushConstants),
+        sizeof(ForwardPushConstants),
         &push_constants
     );
-    vkCmdBindIndexBuffer(cmd_buffer, m_triangle_mesh.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(cmd_buffer, 3, 1, 0, 0, 0);
+    vkCmdBindIndexBuffer(cmd_buffer, mesh->index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(cmd_buffer, mesh->index_count, 1, 0, 0, 0);
 
     vkCmdEndRendering(cmd_buffer);
 }
@@ -801,7 +807,12 @@ void Engine::build_ui()
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize
     );
     {
+        ImGui::SeparatorText("General");
         ImGui::ColorEdit3("Color", m_background_color.data());
+        ImGui::Combo("Mesh", &m_selected_mesh, "Cube\0Lucy\0");
+        ImGui::SeparatorText("Camera");
+        ImGui::DragFloat3("Position", glm::value_ptr(m_camera.eye));
+        ImGui::DragFloat3("Forward", glm::value_ptr(m_camera.forward));
     }
     ImGui::End();
 }
@@ -866,6 +877,11 @@ void Engine::run()
 [[nodiscard]] bool Engine::immediate_submit(std::function<void(VkCommandBuffer)> f)
 {
     VKERR(
+        vkResetFences(m_device, 1, &m_immediate_commands.fence),
+        "Engine::immediate_submit: failed to reset fence"
+    );
+
+    VKERR(
         vkResetCommandBuffer(m_immediate_commands.cmd_buffer, 0),
         "Engine::immediate_submit: failed to reset command buffer"
     );
@@ -906,11 +922,6 @@ void Engine::run()
             std::numeric_limits<uint64_t>::max()
         ),
         "Engine::immediate_submit: failed to wait for fence"
-    );
-
-    VKERR(
-        vkResetFences(m_device, 1, &m_immediate_commands.fence),
-        "Engine::immediate_submit: failed to reset fence"
     );
 
     return true;
@@ -1109,9 +1120,67 @@ Engine::create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mes
     address_info.buffer = out_mesh->vertex_buffer.buffer;
     out_mesh->vertex_buffer_address = vkGetBufferDeviceAddress(m_device, &address_info);
 
+    out_mesh->index_count = indices.size();
+
     destroy_buffer(&transfer_buffer);
 
     return true;
+}
+
+[[nodiscard]] bool Engine::create_mesh_from_obj(const std::string &path, Mesh *out_mesh)
+{
+
+    tinyobj::ObjReaderConfig reader_config;
+    reader_config.triangulate = true;
+
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromFile(path, reader_config))
+    {
+        spdlog::error(
+            "Engine::create_mesh_from_obj: failed to parse obj from file: {}",
+            reader.Error()
+        );
+        return false;
+    }
+
+    if (!reader.Warning().empty())
+    {
+        spdlog::warn("Engine::create_mesh_from_obj: {}", reader.Warning());
+    }
+
+    if (reader.GetShapes().empty())
+    {
+        spdlog::error("Engine::create_mesh_from_obj: no shapes");
+        return false;
+    }
+
+    const tinyobj::attrib_t &attribs = reader.GetAttrib();
+    const tinyobj::mesh_t &mesh = reader.GetShapes()[0].mesh;
+
+    std::vector<Vertex> vertices;
+    vertices.reserve(attribs.vertices.size());
+
+    std::vector<uint32_t> indices;
+    indices.reserve(mesh.indices.size());
+
+    for (size_t i = 0; i < attribs.vertices.size(); i += 3)
+    {
+        vertices.emplace_back(Vertex{
+            .position =
+                {
+                    attribs.vertices[i + 0],
+                    attribs.vertices[i + 1],
+                    attribs.vertices[i + 2],
+                }
+        });
+    }
+
+    for (const auto &index : mesh.indices)
+    {
+        indices.emplace_back(index.vertex_index);
+    }
+
+    return create_mesh(vertices, indices, out_mesh);
 }
 
 void Engine::destroy_mesh(Mesh *mesh)
