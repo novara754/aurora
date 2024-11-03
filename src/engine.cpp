@@ -18,7 +18,6 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
 
-#include "gpu_buffer.hpp"
 #include "read_file.hpp"
 #include "vkerr.hpp"
 
@@ -133,10 +132,8 @@ bool Engine::init()
     VkImageUsageFlags render_target_usage =
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    m_deletion_queue.add([&] { m_render_target.release(m_device, m_allocator); });
-    if (!m_render_target.allocate(
-            m_device,
-            m_allocator,
+    if (!create_image(
+
             VMA_MEMORY_USAGE_GPU_ONLY,
             VK_FORMAT_R16G16B16A16_SFLOAT,
             VkExtent3D{
@@ -145,12 +142,14 @@ bool Engine::init()
                 .depth = 1,
             },
             render_target_usage,
-            VK_IMAGE_ASPECT_COLOR_BIT
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            &m_render_target
         ))
     {
         spdlog::error("Engine::init: failed to allocate render target image");
         return false;
     }
+    m_deletion_queue.add([&] { destroy_image(&m_render_target); });
 
     auto graphics_queue_ret = vkb_device.get_queue(vkb::QueueType::graphics);
     if (!graphics_queue_ret)
@@ -1059,31 +1058,132 @@ void Engine::run()
     return true;
 }
 
+[[nodiscard]] bool Engine::create_image(
+    VmaMemoryUsage memory_usage, VkFormat format, VkExtent3D extent, VkImageUsageFlags usage,
+    VkImageAspectFlags aspect_mask, GPUImage *out_image
+)
+{
+    out_image->format = format;
+    out_image->extent = extent;
+
+    VkImageCreateInfo image_info = {};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent = extent;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = usage;
+
+    VmaAllocationCreateInfo allocation_info = {};
+    allocation_info.usage = memory_usage;
+    allocation_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    VKERR(
+        vmaCreateImage(
+            m_allocator,
+            &image_info,
+            &allocation_info,
+            &out_image->image,
+            &out_image->allocation,
+            &out_image->allocation_info
+        ),
+        "Engine::create_image: failed to create image"
+    );
+
+    VkImageViewCreateInfo view_info = {};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = out_image->image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange.aspectMask = aspect_mask;
+    view_info.subresourceRange.baseMipLevel = 0;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount = 1;
+
+    if (VkResult res = vkCreateImageView(m_device, &view_info, nullptr, &out_image->view);
+        res != VK_SUCCESS)
+    {
+        vmaDestroyImage(m_allocator, out_image->image, out_image->allocation);
+        spdlog::error(
+            "Engine::create_image: failed to create image view: result = {}",
+            static_cast<int>(res)
+        );
+        return false;
+    }
+
+    return true;
+}
+
+void Engine::destroy_image(GPUImage *image)
+{
+
+    vkDestroyImageView(m_device, image->view, nullptr);
+    vmaDestroyImage(m_allocator, image->image, image->allocation);
+}
+
+[[nodiscard]] bool Engine::create_buffer(
+    VmaMemoryUsage memory_usage, VkDeviceSize size, VkBufferUsageFlags usage, GPUBuffer *out_buffer
+)
+{
+    VkBufferCreateInfo buffer_info = {};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = usage;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo alloc_info = {};
+    alloc_info.usage = memory_usage;
+    alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VKERR(
+        vmaCreateBuffer(
+            m_allocator,
+            &buffer_info,
+            &alloc_info,
+            &out_buffer->buffer,
+            &out_buffer->allocation,
+            &out_buffer->allocation_info
+        ),
+        "Engine::create_buffer: failed to create buffer"
+    );
+
+    return true;
+}
+
+void Engine::destroy_buffer(GPUBuffer *buffer)
+{
+    vmaDestroyBuffer(m_allocator, buffer->buffer, buffer->allocation);
+}
+
 [[nodiscard]] bool Engine::create_mesh(std::span<Vertex> vertices, Mesh *out_mesh)
 {
     VkDeviceSize vertex_buffer_size = vertices.size() * sizeof(Vertex);
 
-    if (!out_mesh->vertex_buffer.allocate(
-            m_allocator,
-            VMA_MEMORY_USAGE_GPU_ONLY,
-            vertex_buffer_size,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-        ))
-    {
-        spdlog::error("Engine::create_mesh: failed to allocate vertex buffer");
-        return false;
-    }
-
     GPUBuffer transfer_buffer;
-    if (!transfer_buffer.allocate(
-            m_allocator,
+    if (!create_buffer(
             VMA_MEMORY_USAGE_CPU_TO_GPU,
             vertex_buffer_size,
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            &transfer_buffer
         ))
     {
         spdlog::error("Engine::create_mesh: failed to allocate transfer buffer");
+        return false;
+    }
+
+    if (!create_buffer(
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            vertex_buffer_size,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            &out_mesh->vertex_buffer
+        ))
+    {
+        destroy_buffer(&transfer_buffer);
+        spdlog::error("Engine::create_mesh: failed to allocate vertex buffer");
         return false;
     }
 
@@ -1104,7 +1204,8 @@ void Engine::run()
             );
         }))
     {
-        transfer_buffer.release(m_allocator);
+        destroy_buffer(&transfer_buffer);
+        destroy_buffer(&out_mesh->vertex_buffer);
 
         spdlog::error("Engine::create_mesh: failed to copy data to vertex buffer");
         return false;
@@ -1115,14 +1216,14 @@ void Engine::run()
     address_info.buffer = out_mesh->vertex_buffer.buffer;
     out_mesh->vertex_buffer_address = vkGetBufferDeviceAddress(m_device, &address_info);
 
-    transfer_buffer.release(m_allocator);
+    destroy_buffer(&transfer_buffer);
 
     return true;
 }
 
-void Engine::destroy_mesh(Mesh *out_mesh)
+void Engine::destroy_mesh(Mesh *mesh)
 {
-    out_mesh->vertex_buffer.release(m_allocator);
+    destroy_buffer(&mesh->vertex_buffer);
 }
 
 VkBool32 Engine::debug_message_callback(

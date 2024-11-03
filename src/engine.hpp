@@ -11,8 +11,22 @@
 
 #include <glm/glm.hpp>
 
-#include "gpu_buffer.hpp"
-#include "gpu_image.hpp"
+struct GPUBuffer
+{
+    VkBuffer buffer{VK_NULL_HANDLE};
+    VmaAllocation allocation{VK_NULL_HANDLE};
+    VmaAllocationInfo allocation_info{};
+};
+
+struct GPUImage
+{
+    VkExtent3D extent;
+    VkFormat format;
+    VkImage image;
+    VkImageView view;
+    VmaAllocation allocation;
+    VmaAllocationInfo allocation_info;
+};
 
 struct Vertex
 {
@@ -141,12 +155,27 @@ class Engine
     [[nodiscard]] bool init_gradient_pipeline();
     [[nodiscard]] bool init_triangle_pipeline();
     [[nodiscard]] bool init_imgui();
+
     void draw_frame(VkCommandBuffer cmd_buffer);
     void draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_view);
     [[nodiscard]] bool render_frame();
+
     void build_ui();
+
     [[nodiscard]] bool immediate_submit(std::function<void(VkCommandBuffer)> f);
 
+    [[nodiscard]] bool create_image(
+        VmaMemoryUsage memory_usage, VkFormat format, VkExtent3D extent, VkImageUsageFlags usage,
+        VkImageAspectFlags aspect_mask, GPUImage *out_image
+    );
+    void destroy_image(GPUImage *image);
+
+    [[nodiscard]] bool create_buffer(
+        VmaMemoryUsage memory_usage, VkDeviceSize size, VkBufferUsageFlags usage,
+        GPUBuffer *out_buffer
+    );
+    void destroy_buffer(GPUBuffer *buffer);
+
     [[nodiscard]] bool create_mesh(std::span<Vertex> vertices, Mesh *out_mesh);
-    void destroy_mesh(Mesh *out_mesh);
+    void destroy_mesh(Mesh *mesh);
 };
