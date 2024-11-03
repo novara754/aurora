@@ -37,6 +37,7 @@ struct Vertex
 struct Mesh
 {
     GPUBuffer vertex_buffer;
+    GPUBuffer index_buffer;
     VkDeviceAddress vertex_buffer_address;
 };
 
@@ -170,6 +171,7 @@ class Engine
     );
     void destroy_buffer(GPUBuffer *buffer);
 
-    [[nodiscard]] bool create_mesh(std::span<Vertex> vertices, Mesh *out_mesh);
+    [[nodiscard]] bool
+    create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mesh *out_mesh);
     void destroy_mesh(Mesh *mesh);
 };

@@ -263,13 +263,15 @@ bool Engine::init()
     }
 
     {
-        std::array triangle{
+        std::array vertices{
             Vertex{{0.0f, -0.5f, 0.0f}},
             Vertex{{0.5f, 0.5f, 0.0f}},
             Vertex{{-0.5f, 0.5f, 0.0f}},
         };
 
-        if (!create_mesh(triangle, &m_triangle_mesh))
+        std::array<uint32_t, 3> indices{0, 1, 2};
+
+        if (!create_mesh(vertices, indices, &m_triangle_mesh))
         {
             spdlog::error("Engine::init: failed to create triangle mesh");
             return false;
@@ -368,8 +370,8 @@ bool Engine::refresh_swapchain()
         vkDestroyPipelineLayout(m_device, m_forward_pipeline_layout, nullptr);
     });
 
-    std::vector<uint8_t> vertex_code = read_file("../shaders/triangle.vert.bin");
-    std::vector<uint8_t> fragment_code = read_file("../shaders/triangle.frag.bin");
+    std::vector<uint8_t> vertex_code = read_file("../shaders/forward.vert.bin");
+    std::vector<uint8_t> fragment_code = read_file("../shaders/forward.frag.bin");
 
     VkShaderModule vertex_shader;
     VkShaderModuleCreateInfo vertex_info = {};
@@ -633,7 +635,8 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         sizeof(TrianglePushConstants),
         &push_constants
     );
-    vkCmdDraw(cmd_buffer, 3, 1, 0, 0);
+    vkCmdBindIndexBuffer(cmd_buffer, m_triangle_mesh.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(cmd_buffer, 3, 1, 0, 0, 0);
 
     vkCmdEndRendering(cmd_buffer);
 }
@@ -1013,14 +1016,16 @@ void Engine::destroy_buffer(GPUBuffer *buffer)
     vmaDestroyBuffer(m_allocator, buffer->buffer, buffer->allocation);
 }
 
-[[nodiscard]] bool Engine::create_mesh(std::span<Vertex> vertices, Mesh *out_mesh)
+[[nodiscard]] bool
+Engine::create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mesh *out_mesh)
 {
     VkDeviceSize vertex_buffer_size = vertices.size() * sizeof(Vertex);
+    VkDeviceSize index_buffer_size = indices.size() * sizeof(uint32_t);
 
     GPUBuffer transfer_buffer;
     if (!create_buffer(
             VMA_MEMORY_USAGE_CPU_TO_GPU,
-            vertex_buffer_size,
+            vertex_buffer_size + index_buffer_size,
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             &transfer_buffer
         ))
@@ -1042,10 +1047,29 @@ void Engine::destroy_buffer(GPUBuffer *buffer)
         return false;
     }
 
+    if (!create_buffer(
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            index_buffer_size,
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &out_mesh->index_buffer
+        ))
+    {
+        destroy_buffer(&transfer_buffer);
+        destroy_buffer(&out_mesh->vertex_buffer);
+        spdlog::error("Engine::create_mesh: failed to allocate index buffer");
+        return false;
+    }
+
     std::memcpy(transfer_buffer.allocation_info.pMappedData, vertices.data(), vertex_buffer_size);
+    std::memcpy(
+        reinterpret_cast<uint8_t *>(transfer_buffer.allocation_info.pMappedData) +
+            vertex_buffer_size,
+        indices.data(),
+        index_buffer_size
+    );
 
     if (!immediate_submit([&](VkCommandBuffer cmd_buffer) {
-            VkBufferCopy copy_region{
+            VkBufferCopy copy_vertex_region{
                 .srcOffset = 0,
                 .dstOffset = 0,
                 .size = vertex_buffer_size,
@@ -1055,12 +1079,26 @@ void Engine::destroy_buffer(GPUBuffer *buffer)
                 transfer_buffer.buffer,
                 out_mesh->vertex_buffer.buffer,
                 1,
-                &copy_region
+                &copy_vertex_region
+            );
+
+            VkBufferCopy copy_index_region{
+                .srcOffset = vertex_buffer_size,
+                .dstOffset = 0,
+                .size = index_buffer_size,
+            };
+            vkCmdCopyBuffer(
+                cmd_buffer,
+                transfer_buffer.buffer,
+                out_mesh->index_buffer.buffer,
+                1,
+                &copy_index_region
             );
         }))
     {
         destroy_buffer(&transfer_buffer);
         destroy_buffer(&out_mesh->vertex_buffer);
+        destroy_buffer(&out_mesh->index_buffer);
 
         spdlog::error("Engine::create_mesh: failed to copy data to vertex buffer");
         return false;
@@ -1079,6 +1117,7 @@ void Engine::destroy_buffer(GPUBuffer *buffer)
 void Engine::destroy_mesh(Mesh *mesh)
 {
     destroy_buffer(&mesh->vertex_buffer);
+    destroy_buffer(&mesh->index_buffer);
 }
 
 VkBool32 Engine::debug_message_callback(
