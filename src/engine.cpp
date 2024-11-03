@@ -164,15 +164,9 @@ bool Engine::init()
     m_graphics_queue_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
     spdlog::trace("Engine::init: acquired graphics queue");
 
-    if (!init_gradient_pipeline())
+    if (!init_forward_pipeline())
     {
-        spdlog::error("Engine::init: failed to initialize gradient pipeline");
-        return false;
-    }
-
-    if (!init_triangle_pipeline())
-    {
-        spdlog::error("Engine::init: failed to initialize triangle pipeline");
+        spdlog::error("Engine::init: failed to initialize forward pipeline");
         return false;
     }
 
@@ -353,133 +347,7 @@ bool Engine::refresh_swapchain()
     return init_swapchain();
 }
 
-[[nodiscard]] bool Engine::init_gradient_pipeline()
-{
-    std::vector<uint8_t> shader_code = read_file("../shaders/gradient.comp.bin");
-
-    VkShaderModule gradient_shader;
-    VkShaderModuleCreateInfo gradient_shader_info = {};
-    gradient_shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    gradient_shader_info.codeSize = shader_code.size();
-    gradient_shader_info.pCode = reinterpret_cast<uint32_t *>(shader_code.data());
-    VKERR(
-        vkCreateShaderModule(m_device, &gradient_shader_info, nullptr, &gradient_shader),
-        "Engine::init_gradient_pipeline: failed to create shader module"
-    );
-    m_deletion_queue.add([this, gradient_shader] {
-        vkDestroyShaderModule(m_device, gradient_shader, nullptr);
-    });
-    spdlog::trace("Engine::init_gradient_pipeline: created gradient shader module");
-
-    VkDescriptorSetLayout set_layout;
-    VkDescriptorSetLayoutBinding binding{
-        .binding = 0,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        .pImmutableSamplers = nullptr,
-    };
-    VkDescriptorSetLayoutCreateInfo set_layout_info = {};
-    set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    set_layout_info.bindingCount = 1;
-    set_layout_info.pBindings = &binding;
-    VKERR(
-        vkCreateDescriptorSetLayout(m_device, &set_layout_info, nullptr, &set_layout),
-        "Engine::init_gradient_pipeline: failed to create descriptor set layout"
-    );
-    m_deletion_queue.add([this, set_layout] {
-        vkDestroyDescriptorSetLayout(m_device, set_layout, nullptr);
-    });
-    spdlog::trace("Engine::init_gradient_pipeline: created descriptor set layout");
-
-    VkPushConstantRange push_constant_range{
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        .offset = 0,
-        .size = sizeof(float) * 3,
-    };
-    VkPipelineLayoutCreateInfo layout_info = {};
-    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_info.setLayoutCount = 1;
-    layout_info.pSetLayouts = &set_layout;
-    layout_info.pushConstantRangeCount = 1;
-    layout_info.pPushConstantRanges = &push_constant_range;
-    VKERR(
-        vkCreatePipelineLayout(m_device, &layout_info, nullptr, &m_gradient_pipeline_layout),
-        "Engine::init_gradient_pipeline: failed to create pipeline layout"
-    );
-    m_deletion_queue.add([&] {
-        vkDestroyPipelineLayout(m_device, m_gradient_pipeline_layout, nullptr);
-    });
-    spdlog::trace("Engine::init_gradient_pipeline: created gradient pipeline layout");
-
-    VkComputePipelineCreateInfo pipeline_info = {};
-    pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipeline_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeline_info.stage.module = gradient_shader;
-    pipeline_info.stage.pName = "main";
-    pipeline_info.layout = m_gradient_pipeline_layout;
-    VKERR(
-        vkCreateComputePipelines(
-            m_device,
-            VK_NULL_HANDLE,
-            1,
-            &pipeline_info,
-            nullptr,
-            &m_gradient_pipeline
-        ),
-        "Engine::init_gradient_pipeline: failed to create pipeline"
-    );
-    m_deletion_queue.add([&] { vkDestroyPipeline(m_device, m_gradient_pipeline, nullptr); });
-    spdlog::trace("Engine::init_gradient_pipeline: created gradient pipeline");
-
-    VkDescriptorPoolSize pool_size{
-        .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = 1,
-    };
-    VkDescriptorPoolCreateInfo pool_info = {};
-    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = 1;
-    pool_info.poolSizeCount = 1;
-    pool_info.pPoolSizes = &pool_size;
-    VKERR(
-        vkCreateDescriptorPool(m_device, &pool_info, nullptr, &m_descriptor_pool),
-        "Engine::init_gradient_pipeline: failed to create descriptor pool"
-    );
-    m_deletion_queue.add([&] { vkDestroyDescriptorPool(m_device, m_descriptor_pool, nullptr); });
-    spdlog::trace("Engine::init_gradient_pipeline: created descriptor pool");
-
-    VkDescriptorSetAllocateInfo set_info = {};
-    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    set_info.descriptorPool = m_descriptor_pool;
-    set_info.descriptorSetCount = 1;
-    set_info.pSetLayouts = &set_layout;
-    VKERR(
-        vkAllocateDescriptorSets(m_device, &set_info, &m_gradient_set),
-        "Engine::init_gradient_pipeline: failed to allocate descriptor set"
-    );
-    spdlog::trace("Engine::init_gradient_pipeline: created descriptor set");
-
-    VkDescriptorImageInfo image_info{
-        .sampler = VK_NULL_HANDLE,
-        .imageView = m_render_target.view,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-
-    VkWriteDescriptorSet write_set = {};
-    write_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write_set.dstSet = m_gradient_set;
-    write_set.dstBinding = 0;
-    write_set.dstArrayElement = 0;
-    write_set.descriptorCount = 1;
-    write_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    write_set.pImageInfo = &image_info;
-    vkUpdateDescriptorSets(m_device, 1, &write_set, 0, nullptr);
-
-    return true;
-}
-
-[[nodiscard]] bool Engine::init_triangle_pipeline()
+[[nodiscard]] bool Engine::init_forward_pipeline()
 {
     VkPushConstantRange push_constant_range{
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
@@ -493,11 +361,11 @@ bool Engine::refresh_swapchain()
     layout_info.pushConstantRangeCount = 1;
     layout_info.pPushConstantRanges = &push_constant_range;
     VKERR(
-        vkCreatePipelineLayout(m_device, &layout_info, nullptr, &m_triangle_pipeline_layout),
-        "Engine::init_triangle_pipelie: failed to create pipeline layout"
+        vkCreatePipelineLayout(m_device, &layout_info, nullptr, &m_forward_pipeline_layout),
+        "Engine::init_forward_pipeline: failed to create pipeline layout"
     );
     m_deletion_queue.add([&] {
-        vkDestroyPipelineLayout(m_device, m_triangle_pipeline_layout, nullptr);
+        vkDestroyPipelineLayout(m_device, m_forward_pipeline_layout, nullptr);
     });
 
     std::vector<uint8_t> vertex_code = read_file("../shaders/triangle.vert.bin");
@@ -510,7 +378,7 @@ bool Engine::refresh_swapchain()
     vertex_info.pCode = reinterpret_cast<uint32_t *>(vertex_code.data());
     VKERR(
         vkCreateShaderModule(m_device, &vertex_info, nullptr, &vertex_shader),
-        "Engine::init_triangle_pipelie: failed to create vertex shader module"
+        "Engine::init_forward_pipeline: failed to create vertex shader module"
     );
     m_deletion_queue.add([this, vertex_shader] {
         vkDestroyShaderModule(m_device, vertex_shader, nullptr);
@@ -529,7 +397,7 @@ bool Engine::refresh_swapchain()
     fragment_info.pCode = reinterpret_cast<uint32_t *>(fragment_code.data());
     VKERR(
         vkCreateShaderModule(m_device, &fragment_info, nullptr, &fragment_shader),
-        "Engine::init_triangle_pipelie: failed to create fragment shader module"
+        "Engine::init_forward_pipeline: failed to create fragment shader module"
     );
     m_deletion_queue.add([this, fragment_shader] {
         vkDestroyShaderModule(m_device, fragment_shader, nullptr);
@@ -606,7 +474,7 @@ bool Engine::refresh_swapchain()
     pipeline_info.pDepthStencilState = &depth_stencil_state;
     pipeline_info.pColorBlendState = &color_blend_state;
     pipeline_info.pDynamicState = &dynamic_state;
-    pipeline_info.layout = m_triangle_pipeline_layout;
+    pipeline_info.layout = m_forward_pipeline_layout;
     VKERR(
         vkCreateGraphicsPipelines(
             m_device,
@@ -614,11 +482,11 @@ bool Engine::refresh_swapchain()
             1,
             &pipeline_info,
             nullptr,
-            &m_triangle_pipeline
+            &m_forward_pipeline
         ),
-        "Engine::init_triangle_pipeline: failed to create pipeline"
+        "Engine::init_forward_pipeline: failed to create pipeline"
     );
-    m_deletion_queue.add([&] { vkDestroyPipeline(m_device, m_triangle_pipeline, nullptr); });
+    m_deletion_queue.add([&] { vkDestroyPipeline(m_device, m_forward_pipeline, nullptr); });
     return true;
 }
 
@@ -701,30 +569,17 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         VK_IMAGE_LAYOUT_GENERAL
     );
 
-    vkCmdPushConstants(
+    VkClearColorValue clear_color{
+        .float32 = {m_background_color[0], m_background_color[1], m_background_color[2], 1.0f}
+    };
+    VkImageSubresourceRange clear_range = full_image_range(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(
         cmd_buffer,
-        m_gradient_pipeline_layout,
-        VK_SHADER_STAGE_COMPUTE_BIT,
-        0,
-        sizeof(m_color),
-        m_color.data()
-    );
-    vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_gradient_pipeline);
-    vkCmdBindDescriptorSets(
-        cmd_buffer,
-        VK_PIPELINE_BIND_POINT_COMPUTE,
-        m_gradient_pipeline_layout,
-        0,
+        m_render_target.image,
+        VK_IMAGE_LAYOUT_GENERAL,
+        &clear_color,
         1,
-        &m_gradient_set,
-        0,
-        nullptr
-    );
-    vkCmdDispatch(
-        cmd_buffer,
-        (m_render_target.extent.width + 15) / 16,
-        (m_render_target.extent.height + 15) / 16,
-        1
+        &clear_range
     );
 
     VkRenderingAttachmentInfo color_attachment = {};
@@ -767,12 +622,12 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         .vertex_buffer_address = m_triangle_mesh.vertex_buffer_address,
     };
 
-    vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_triangle_pipeline);
+    vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_forward_pipeline);
     vkCmdSetViewport(cmd_buffer, 0, 1, &viewport);
     vkCmdSetScissor(cmd_buffer, 0, 1, &scissor);
     vkCmdPushConstants(
         cmd_buffer,
-        m_triangle_pipeline_layout,
+        m_forward_pipeline_layout,
         VK_SHADER_STAGE_VERTEX_BIT,
         0,
         sizeof(TrianglePushConstants),
@@ -943,7 +798,7 @@ void Engine::build_ui()
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize
     );
     {
-        ImGui::ColorEdit3("Color", m_color.data());
+        ImGui::ColorEdit3("Color", m_background_color.data());
     }
     ImGui::End();
 }

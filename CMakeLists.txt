@@ -119,7 +119,6 @@ compile_shader(aurora
     ENV vulkan1.3
     FORMAT bin
     SOURCES
-        shaders/gradient.comp
-        shaders/triangle.vert
-        shaders/triangle.frag
+        shaders/forward.vert
+        shaders/forward.frag
 )

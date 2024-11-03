@@ -116,15 +116,10 @@ class Engine
 
     bool m_disable_render{false};
 
-    VkDescriptorPool m_descriptor_pool;
-    VkDescriptorSet m_gradient_set;
-    VkPipelineLayout m_gradient_pipeline_layout;
-    VkPipeline m_gradient_pipeline;
+    VkPipelineLayout m_forward_pipeline_layout;
+    VkPipeline m_forward_pipeline;
 
-    VkPipelineLayout m_triangle_pipeline_layout;
-    VkPipeline m_triangle_pipeline;
-
-    std::array<float, 3> m_color{1.0f, 0.5f, 0.1f};
+    std::array<float, 3> m_background_color{1.0f, 0.5f, 0.1f};
     Mesh m_triangle_mesh;
 
     Engine(const Engine &) = delete;
@@ -152,8 +147,7 @@ class Engine
     [[nodiscard]] bool init_swapchain();
     [[nodiscard]] bool refresh_swapchain();
 
-    [[nodiscard]] bool init_gradient_pipeline();
-    [[nodiscard]] bool init_triangle_pipeline();
+    [[nodiscard]] bool init_forward_pipeline();
     [[nodiscard]] bool init_imgui();
 
     void draw_frame(VkCommandBuffer cmd_buffer);
