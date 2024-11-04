@@ -1191,8 +1191,11 @@ void Engine::destroy_mesh(Mesh *mesh)
 {
     Assimp::Importer importer;
 
-    const aiScene *scene =
-        importer.ReadFile(path.c_str(), aiProcess_Triangulate | aiProcess_JoinIdenticalVertices);
+    const aiScene *scene = importer.ReadFile(
+        path.c_str(),
+        aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_GenNormals |
+            aiProcess_GenUVCoords
+    );
     if (scene == nullptr)
     {
         spdlog::error("Engine::create_scene_from_file: failed to load file");
@@ -1213,22 +1216,23 @@ void Engine::destroy_mesh(Mesh *mesh)
         const aiMesh *ai_mesh = scene->mMeshes[mesh_idx];
         for (size_t vertex_idx = 0; vertex_idx < ai_mesh->mNumVertices; ++vertex_idx)
         {
-            vertices.emplace_back(Vertex{
+            Vertex vertex{
                 .position =
                     {
                         ai_mesh->mVertices[vertex_idx].x,
                         ai_mesh->mVertices[vertex_idx].y,
                         ai_mesh->mVertices[vertex_idx].z,
                     },
-                .tex_coord_x = 0.0f, // ai_mesh->mTextureCoords[vertex_idx]->x,
+                .tex_coord_x = ai_mesh->mTextureCoords[0][vertex_idx].x,
                 .normal =
                     {
                         ai_mesh->mNormals[vertex_idx].x,
                         ai_mesh->mNormals[vertex_idx].y,
                         ai_mesh->mNormals[vertex_idx].z,
                     },
-                .tex_coord_y = 0.0f, // ai_mesh->mTextureCoords[vertex_idx]->y,
-            });
+                .tex_coord_y = ai_mesh->mTextureCoords[0][vertex_idx].y,
+            };
+            vertices.emplace_back(vertex);
         }
 
         for (size_t face_idx = 0; face_idx < ai_mesh->mNumFaces; ++face_idx)

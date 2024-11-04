@@ -27,5 +27,5 @@ void main()
 {
 	Vertex vertex = constants.vertex_buffer.vertices[gl_VertexIndex];
 	gl_Position = constants.camera * constants.model * vec4(vertex.position, 1.0);
-	color = vertex.normal;
+	color = vec3(vertex.tex_coord_x, vertex.tex_coord_y, 0.0);
 }
