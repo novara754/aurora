@@ -161,6 +161,26 @@ bool Engine::init()
     }
     m_deletion_queue.add([&] { destroy_image(&m_render_target); });
 
+    VkImageUsageFlags depth_target_usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (!create_image(
+
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            VK_FORMAT_D32_SFLOAT,
+            VkExtent3D{
+                .width = m_swapchain_extent.width,
+                .height = m_swapchain_extent.height,
+                .depth = 1,
+            },
+            depth_target_usage,
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            &m_depth_target
+        ))
+    {
+        spdlog::error("Engine::init: failed to allocate depth target image");
+        return false;
+    }
+    m_deletion_queue.add([&] { destroy_image(&m_depth_target); });
+
     auto graphics_queue_ret = vkb_device.get_queue(vkb::QueueType::graphics);
     if (!graphics_queue_ret)
     {
@@ -440,6 +460,9 @@ bool Engine::refresh_swapchain()
 
     VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {};
     depth_stencil_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_stencil_state.depthTestEnable = VK_TRUE;
+    depth_stencil_state.depthWriteEnable = VK_TRUE;
+    depth_stencil_state.depthCompareOp = VK_COMPARE_OP_LESS;
 
     VkPipelineColorBlendAttachmentState color_blend_attachment_state{
         .blendEnable = VK_TRUE,
@@ -465,8 +488,15 @@ bool Engine::refresh_swapchain()
     dynamic_state.dynamicStateCount = dynamic_states.size();
     dynamic_state.pDynamicStates = dynamic_states.data();
 
+    VkPipelineRenderingCreateInfo pipeline_rendering_info = {};
+    pipeline_rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipeline_rendering_info.colorAttachmentCount = 1;
+    pipeline_rendering_info.pColorAttachmentFormats = &m_render_target.format;
+    pipeline_rendering_info.depthAttachmentFormat = m_depth_target.format;
+
     VkGraphicsPipelineCreateInfo pipeline_info = {};
     pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.pNext = &pipeline_rendering_info;
     pipeline_info.stageCount = stages.size();
     pipeline_info.pStages = stages.data();
     pipeline_info.pVertexInputState = &vertex_input_state;
@@ -572,6 +602,12 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
     );
+    transition_image(
+        cmd_buffer,
+        m_depth_target.image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+    );
 
     VkClearColorValue clear_color{
         .float32 = {m_background_color[0], m_background_color[1], m_background_color[2], 1.0f}
@@ -593,6 +629,14 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
     color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
+    VkRenderingAttachmentInfo depth_attachment = {};
+    depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    depth_attachment.imageView = m_depth_target.view;
+    depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_attachment.clearValue.depthStencil.depth = 1.0f;
+
     VkRenderingInfo rendering_info = {};
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering_info.renderArea.extent = VkExtent2D{
@@ -602,6 +646,7 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
     rendering_info.layerCount = 1;
     rendering_info.colorAttachmentCount = 1;
     rendering_info.pColorAttachments = &color_attachment;
+    rendering_info.pDepthAttachment = &depth_attachment;
     vkCmdBeginRendering(cmd_buffer, &rendering_info);
 
     VkViewport viewport{
@@ -1285,7 +1330,7 @@ void transition_image(
     VkCommandBuffer cmd_buffer, VkImage image, VkImageLayout src_layout, VkImageLayout dst_layout
 )
 {
-    VkImageAspectFlags aspect_mask = (src_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+    VkImageAspectFlags aspect_mask = (dst_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
                                          ? VK_IMAGE_ASPECT_DEPTH_BIT
                                          : VK_IMAGE_ASPECT_COLOR_BIT;
 

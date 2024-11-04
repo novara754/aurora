@@ -144,6 +144,7 @@ class Engine
     DeletionQueue m_deletion_queue;
 
     GPUImage m_render_target;
+    GPUImage m_depth_target;
 
     struct
     {
