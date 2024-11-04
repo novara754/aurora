@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <glm/trigonometric.hpp>
 #include <limits>
 #include <vector>
 
@@ -20,6 +21,10 @@
 #include <imgui_impl_vulkan.h>
 
 #include <tiny_obj_loader.h>
+
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
 
 #include <glm/gtc/type_ptr.hpp>
 
@@ -268,19 +273,13 @@ bool Engine::init()
     }
 
     {
-        if (!create_mesh_from_obj("../meshes/cube.obj", &m_cube_mesh))
+        if (!create_scene_from_file("../meshes/flight_helmet/FlightHelmet.gltf", &m_scene))
         {
-            spdlog::error("Engine::init: failed to create cube mesh");
+            destroy_scene(&m_scene);
+            spdlog::error("Engine::init: failed to load flight helmet scene");
             return false;
         }
-        m_deletion_queue.add([&] { destroy_mesh(&m_cube_mesh); });
-
-        if (!create_mesh_from_obj("../meshes/lucy.obj", &m_lucy_mesh))
-        {
-            spdlog::error("Engine::init: failed to create lucy mesh");
-            return false;
-        }
-        m_deletion_queue.add([&] { destroy_mesh(&m_lucy_mesh); });
+        m_deletion_queue.add([&] { destroy_scene(&m_scene); });
     }
 
     if (!init_imgui())
@@ -623,26 +622,33 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
             },
     };
 
-    Mesh *mesh = m_meshes[m_selected_mesh];
-
-    ForwardPushConstants push_constants{
-        .camera = m_camera.get_matrix(),
-        .vertex_buffer_address = mesh->vertex_buffer_address,
-    };
-
     vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_forward_pipeline);
     vkCmdSetViewport(cmd_buffer, 0, 1, &viewport);
     vkCmdSetScissor(cmd_buffer, 0, 1, &scissor);
-    vkCmdPushConstants(
-        cmd_buffer,
-        m_forward_pipeline_layout,
-        VK_SHADER_STAGE_VERTEX_BIT,
-        0,
-        sizeof(ForwardPushConstants),
-        &push_constants
-    );
-    vkCmdBindIndexBuffer(cmd_buffer, mesh->index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(cmd_buffer, mesh->index_count, 1, 0, 0, 0);
+
+    for (const Scene::Object &obj : m_scene.objects)
+    {
+        const Mesh &mesh = m_scene.meshes[obj.mesh_idx];
+        ForwardPushConstants push_constants{
+            .camera = m_camera.get_matrix(),
+            .model = glm::rotate(
+                glm::mat4(1.0f),
+                glm::radians(m_scene_rotation),
+                glm::vec3(0.0f, 1.0f, 0.0f)
+            ),
+            .vertex_buffer_address = mesh.vertex_buffer_address,
+        };
+        vkCmdPushConstants(
+            cmd_buffer,
+            m_forward_pipeline_layout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(ForwardPushConstants),
+            &push_constants
+        );
+        vkCmdBindIndexBuffer(cmd_buffer, mesh.index_buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd_buffer, mesh.index_count, 1, 0, 0, 0);
+    }
 
     vkCmdEndRendering(cmd_buffer);
 }
@@ -809,10 +815,11 @@ void Engine::build_ui()
     {
         ImGui::SeparatorText("General");
         ImGui::ColorEdit3("Color", m_background_color.data());
-        ImGui::Combo("Mesh", &m_selected_mesh, "Cube\0Lucy\0");
+        ImGui::SeparatorText("Scene");
+        ImGui::SliderFloat("Rotation", &m_scene_rotation, -180.0f, 180.0f);
         ImGui::SeparatorText("Camera");
-        ImGui::DragFloat3("Position", glm::value_ptr(m_camera.eye));
-        ImGui::DragFloat3("Forward", glm::value_ptr(m_camera.forward));
+        ImGui::DragFloat3("Position", glm::value_ptr(m_camera.eye), 0.1f);
+        ImGui::DragFloat3("Forward", glm::value_ptr(m_camera.forward), 0.1f);
     }
     ImGui::End();
 }
@@ -1127,66 +1134,109 @@ Engine::create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mes
     return true;
 }
 
-[[nodiscard]] bool Engine::create_mesh_from_obj(const std::string &path, Mesh *out_mesh)
-{
-
-    tinyobj::ObjReaderConfig reader_config;
-    reader_config.triangulate = true;
-
-    tinyobj::ObjReader reader;
-    if (!reader.ParseFromFile(path, reader_config))
-    {
-        spdlog::error(
-            "Engine::create_mesh_from_obj: failed to parse obj from file: {}",
-            reader.Error()
-        );
-        return false;
-    }
-
-    if (!reader.Warning().empty())
-    {
-        spdlog::warn("Engine::create_mesh_from_obj: {}", reader.Warning());
-    }
-
-    if (reader.GetShapes().empty())
-    {
-        spdlog::error("Engine::create_mesh_from_obj: no shapes");
-        return false;
-    }
-
-    const tinyobj::attrib_t &attribs = reader.GetAttrib();
-    const tinyobj::mesh_t &mesh = reader.GetShapes()[0].mesh;
-
-    std::vector<Vertex> vertices;
-    vertices.reserve(attribs.vertices.size());
-
-    std::vector<uint32_t> indices;
-    indices.reserve(mesh.indices.size());
-
-    for (size_t i = 0; i < attribs.vertices.size(); i += 3)
-    {
-        vertices.emplace_back(Vertex{
-            .position =
-                {
-                    attribs.vertices[i + 0],
-                    attribs.vertices[i + 1],
-                    attribs.vertices[i + 2],
-                }
-        });
-    }
-
-    for (const auto &index : mesh.indices)
-    {
-        indices.emplace_back(index.vertex_index);
-    }
-
-    return create_mesh(vertices, indices, out_mesh);
-}
-
 void Engine::destroy_mesh(Mesh *mesh)
 {
     destroy_buffer(&mesh->vertex_buffer);
     destroy_buffer(&mesh->index_buffer);
+}
+
+[[nodiscard]] bool Engine::create_scene_from_file(
+    [[maybe_unused]] const std::string &path, [[maybe_unused]] Scene *out_scene
+)
+{
+    Assimp::Importer importer;
+
+    const aiScene *scene =
+        importer.ReadFile(path.c_str(), aiProcess_Triangulate | aiProcess_JoinIdenticalVertices);
+    if (scene == nullptr)
+    {
+        spdlog::error("Engine::create_scene_from_file: failed to load file");
+        return false;
+    }
+
+    if (scene->mRootNode == nullptr)
+    {
+        spdlog::error("Engine::create_scene_from_file: file has no root node");
+        return false;
+    }
+
+    for (size_t mesh_idx = 0; mesh_idx < scene->mNumMeshes; ++mesh_idx)
+    {
+        std::vector<Vertex> vertices;
+        std::vector<uint32_t> indices;
+
+        const aiMesh *ai_mesh = scene->mMeshes[mesh_idx];
+        for (size_t vertex_idx = 0; vertex_idx < ai_mesh->mNumVertices; ++vertex_idx)
+        {
+            vertices.emplace_back(Vertex{
+                .position =
+                    {
+                        ai_mesh->mVertices[vertex_idx].x,
+                        ai_mesh->mVertices[vertex_idx].y,
+                        ai_mesh->mVertices[vertex_idx].z,
+                    },
+                .tex_coord_x = 0.0f, // ai_mesh->mTextureCoords[vertex_idx]->x,
+                .normal =
+                    {
+                        ai_mesh->mNormals[vertex_idx].x,
+                        ai_mesh->mNormals[vertex_idx].y,
+                        ai_mesh->mNormals[vertex_idx].z,
+                    },
+                .tex_coord_y = 0.0f, // ai_mesh->mTextureCoords[vertex_idx]->y,
+            });
+        }
+
+        for (size_t face_idx = 0; face_idx < ai_mesh->mNumFaces; ++face_idx)
+        {
+            const aiFace *face = &ai_mesh->mFaces[face_idx];
+            for (size_t index_idx = 0; index_idx < face->mNumIndices; ++index_idx)
+            {
+                indices.emplace_back(static_cast<uint32_t>(face->mIndices[index_idx]));
+            }
+        }
+
+        Mesh mesh;
+        if (!create_mesh(vertices, indices, &mesh))
+        {
+            spdlog::error("Engine::create_scene_from_file: failed to create mesh");
+            return false;
+        }
+        out_scene->meshes.emplace_back(mesh);
+    }
+
+    std::vector nodes_to_process{scene->mRootNode};
+    while (!nodes_to_process.empty())
+    {
+        const aiNode *node = nodes_to_process.back();
+        nodes_to_process.pop_back();
+
+        for (size_t i = 0; i < node->mNumChildren; ++i)
+        {
+            nodes_to_process.emplace_back(node->mChildren[i]);
+        }
+
+        if (node->mNumMeshes == 0)
+        {
+            continue;
+        }
+
+        out_scene->objects.emplace_back(Scene::Object{
+            .mesh_idx = node->mMeshes[0],
+        });
+    }
+
+    return true;
+}
+
+void Engine::destroy_scene(Scene *scene)
+{
+    for (auto &mesh : scene->meshes)
+    {
+        destroy_mesh(&mesh);
+    }
+
+    scene->meshes.clear();
+    scene->objects.clear();
 }
 
 VkBool32 Engine::debug_message_callback(

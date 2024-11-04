@@ -34,7 +34,9 @@ struct GPUImage
 struct Vertex
 {
     glm::vec3 position;
-    float padding{0.0f};
+    float tex_coord_x;
+    glm::vec3 normal;
+    float tex_coord_y;
 };
 
 struct Mesh
@@ -43,6 +45,17 @@ struct Mesh
     GPUBuffer vertex_buffer;
     GPUBuffer index_buffer;
     VkDeviceAddress vertex_buffer_address;
+};
+
+struct Scene
+{
+    struct Object
+    {
+        size_t mesh_idx;
+    };
+
+    std::vector<Mesh> meshes;
+    std::vector<Object> objects;
 };
 
 class DeletionQueue
@@ -79,6 +92,7 @@ struct FrameData
 struct ForwardPushConstants
 {
     glm::mat4 camera;
+    glm::mat4 model;
     VkDeviceAddress vertex_buffer_address;
 };
 
@@ -153,10 +167,8 @@ class Engine
         .z_far = 1000.0f,
     };
     std::array<float, 3> m_background_color{1.0f, 0.5f, 0.1f};
-    Mesh m_cube_mesh;
-    Mesh m_lucy_mesh;
-    std::array<Mesh *, 2> m_meshes{&m_cube_mesh, &m_lucy_mesh};
-    int m_selected_mesh{0};
+    Scene m_scene;
+    float m_scene_rotation{0.0f};
 
     Engine(const Engine &) = delete;
     Engine &operator=(const Engine &) = delete;
@@ -208,6 +220,8 @@ class Engine
 
     [[nodiscard]] bool
     create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mesh *out_mesh);
-    [[nodiscard]] bool create_mesh_from_obj(const std::string &path, Mesh *out_mesh);
     void destroy_mesh(Mesh *mesh);
+
+    [[nodiscard]] bool create_scene_from_file(const std::string &path, Scene *out_scene);
+    void destroy_scene(Scene *scene);
 };

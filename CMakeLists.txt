@@ -5,8 +5,15 @@ include(FetchContent)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(SDL_STATIC ON)
 set(SDL_SHARED OFF)
+
+set(BUILD_SHARED_LIBS OFF)
+set(ASSIMP_NO_EXPORT ON)
+set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON)
 
 FetchContent_Declare(
         spdlog
@@ -63,6 +70,14 @@ FetchContent_Declare(
         GIT_TAG "release"
 )
 FetchContent_MakeAvailable(tinyobjloader)
+
+FetchContent_Declare(
+        assimp
+        SYSTEM
+        GIT_REPOSITORY "https://github.com/assimp/assimp"
+        GIT_TAG "v5.4.3"
+)
+FetchContent_MakeAvailable(assimp)
 
 find_package(Vulkan REQUIRED)
 find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
@@ -124,6 +139,7 @@ target_link_libraries(aurora PRIVATE GPUOpen::VulkanMemoryAllocator)
 target_link_libraries(aurora PRIVATE imgui)
 target_link_libraries(aurora PRIVATE glm::glm)
 target_link_libraries(aurora PRIVATE tinyobjloader)
+target_link_libraries(aurora PRIVATE assimp::assimp)
 
 compile_shader(aurora
     ENV vulkan1.3
