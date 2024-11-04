@@ -3,7 +3,6 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <glm/trigonometric.hpp>
 #include <limits>
 #include <vector>
 
@@ -27,6 +26,9 @@
 #include <assimp/scene.h>
 
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/trigonometric.hpp>
+
+#include <stb_image.h>
 
 #include "read_file.hpp"
 #include "vkerr.hpp"
@@ -138,6 +140,34 @@ bool Engine::init()
         return false;
     }
     spdlog::trace("Engine::init: initialized swapchain");
+
+    {
+        std::array pool_sizes = {
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000}
+        };
+
+        VkDescriptorPoolCreateInfo pool_info = {};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_info.maxSets = 100;
+        pool_info.poolSizeCount = pool_sizes.size();
+        pool_info.pPoolSizes = pool_sizes.data();
+        VKERR(
+            vkCreateDescriptorPool(m_device, &pool_info, nullptr, &m_descriptor_pool),
+            "Engine::init: failed to create descriptor pool"
+        );
+        m_deletion_queue.add([&] { vkDestroyDescriptorPool(m_device, m_descriptor_pool, nullptr); }
+        );
+    }
 
     VkImageUsageFlags render_target_usage =
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -292,20 +322,36 @@ bool Engine::init()
         );
     }
 
+    if (!init_imgui())
     {
-        if (!create_scene_from_file("../meshes/flight_helmet/FlightHelmet.gltf", &m_scene))
+        spdlog::error("Engine::init: failed to initialize ImGui");
+        return false;
+    }
+
+    {
+        VkSamplerCreateInfo sampler_info = {};
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = VK_FILTER_LINEAR;
+        sampler_info.minFilter = VK_FILTER_LINEAR;
+        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        VKERR(
+            vkCreateSampler(m_device, &sampler_info, nullptr, &m_sampler),
+            "Engine::init: failed to create sampler"
+        );
+        m_deletion_queue.add([&] { vkDestroySampler(m_device, m_sampler, nullptr); });
+    }
+
+    {
+        if (!create_scene_from_file("../assets/flight_helmet/FlightHelmet.gltf", &m_scene))
         {
             destroy_scene(&m_scene);
             spdlog::error("Engine::init: failed to load flight helmet scene");
             return false;
         }
         m_deletion_queue.add([&] { destroy_scene(&m_scene); });
-    }
-
-    if (!init_imgui())
-    {
-        spdlog::error("Engine::init: failed to initialize ImGui");
-        return false;
     }
 
     return true;
@@ -373,6 +419,24 @@ bool Engine::refresh_swapchain()
 
 [[nodiscard]] bool Engine::init_forward_pipeline()
 {
+    VkDescriptorSetLayoutBinding diffuse_binding = {};
+    diffuse_binding.binding = 0;
+    diffuse_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    diffuse_binding.descriptorCount = 1;
+    diffuse_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo set_layout_info = {};
+    set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set_layout_info.bindingCount = 1;
+    set_layout_info.pBindings = &diffuse_binding;
+    VKERR(
+        vkCreateDescriptorSetLayout(m_device, &set_layout_info, nullptr, &m_forward_set_layout),
+        "Engine::init_forward_pipeline: failed to create descriptor set layout"
+    );
+    m_deletion_queue.add([&] {
+        vkDestroyDescriptorSetLayout(m_device, m_forward_set_layout, nullptr);
+    });
+
     VkPushConstantRange push_constant_range{
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
@@ -380,8 +444,8 @@ bool Engine::refresh_swapchain()
     };
     VkPipelineLayoutCreateInfo layout_info = {};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_info.setLayoutCount = 0;
-    layout_info.pSetLayouts = nullptr;
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &m_forward_set_layout;
     layout_info.pushConstantRangeCount = 1;
     layout_info.pPushConstantRanges = &push_constant_range;
     VKERR(
@@ -674,6 +738,7 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
     for (const Scene::Object &obj : m_scene.objects)
     {
         const Mesh &mesh = m_scene.meshes[obj.mesh_idx];
+
         ForwardPushConstants push_constants{
             .camera = m_camera.get_matrix(),
             .model = glm::rotate(
@@ -683,6 +748,16 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
             ),
             .vertex_buffer_address = mesh.vertex_buffer_address,
         };
+        vkCmdBindDescriptorSets(
+            cmd_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_forward_pipeline_layout,
+            0,
+            1,
+            &m_scene.materials[mesh.material_idx].diffuse_set,
+            0,
+            nullptr
+        );
         vkCmdPushConstants(
             cmd_buffer,
             m_forward_pipeline_layout,
@@ -1038,9 +1113,102 @@ void Engine::run()
     return true;
 }
 
+[[nodiscard]] bool Engine::create_image_from_file(
+    [[maybe_unused]] const std::string &path, [[maybe_unused]] GPUImage *out_image
+)
+{
+    int channels = 4;
+    int width, height;
+    stbi_uc *image_data = stbi_load(path.c_str(), &width, &height, nullptr, channels);
+    if (image_data == nullptr)
+    {
+        spdlog::error("Engine::create_image_from_file: failed to load image data from file");
+        return false;
+    }
+    VkExtent3D extent{
+        .width = static_cast<uint32_t>(width),
+        .height = static_cast<uint32_t>(height),
+        .depth = 1,
+    };
+
+    if (!create_image(
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            VK_FORMAT_R8G8B8A8_SRGB,
+            extent,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            out_image
+        ))
+    {
+        spdlog::error("Engine::create_image_from_file: failed to create gpu image");
+        stbi_image_free(image_data);
+        return false;
+    }
+
+    GPUBuffer transfer_buffer;
+    if (!create_buffer(
+            VMA_MEMORY_USAGE_CPU_TO_GPU,
+            width * height * channels,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            &transfer_buffer
+        ))
+    {
+        stbi_image_free(image_data);
+        destroy_image(out_image);
+        spdlog::error("Engine::create_mesh: failed to allocate transfer buffer");
+        return false;
+    }
+
+    std::memcpy(transfer_buffer.allocation_info.pMappedData, image_data, width * height * channels);
+
+    bool upload_success = immediate_submit([&](VkCommandBuffer cmd_buffer) {
+        transition_image(
+            cmd_buffer,
+            out_image->image,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        );
+        VkBufferImageCopy region = {};
+        region.imageSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        region.imageExtent = extent;
+        vkCmdCopyBufferToImage(
+            cmd_buffer,
+            transfer_buffer.buffer,
+            out_image->image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &region
+        );
+        transition_image(
+            cmd_buffer,
+            out_image->image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL
+        );
+    });
+    if (!upload_success)
+    {
+        destroy_image(out_image);
+        destroy_buffer(&transfer_buffer);
+        stbi_image_free(image_data);
+
+        spdlog::error("Engine::create_image_from_file: failed to transfer image data");
+        return false;
+    }
+
+    destroy_buffer(&transfer_buffer);
+    stbi_image_free(image_data);
+
+    return true;
+}
+
 void Engine::destroy_image(GPUImage *image)
 {
-
     vkDestroyImageView(m_device, image->view, nullptr);
     vmaDestroyImage(m_allocator, image->image, image->allocation);
 }
@@ -1089,7 +1257,7 @@ Engine::create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mes
     if (!create_buffer(
             VMA_MEMORY_USAGE_CPU_TO_GPU,
             vertex_buffer_size + index_buffer_size,
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             &transfer_buffer
         ))
     {
@@ -1185,6 +1353,55 @@ void Engine::destroy_mesh(Mesh *mesh)
     destroy_buffer(&mesh->index_buffer);
 }
 
+[[nodiscard]] bool
+Engine::create_material_from_file(const std::string &diffuse_path, Scene::Material *out_material)
+{
+    if (!create_image_from_file(diffuse_path, &out_material->diffuse))
+    {
+        spdlog::error("Engine::create_material_from_file: failed to load diffuse image");
+        return false;
+    }
+
+    VkDescriptorSetAllocateInfo set_info = {};
+    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    set_info.descriptorPool = m_descriptor_pool;
+    set_info.descriptorSetCount = 1;
+    set_info.pSetLayouts = &m_forward_set_layout;
+    if (VkResult res = vkAllocateDescriptorSets(m_device, &set_info, &out_material->diffuse_set);
+        res != VK_SUCCESS)
+    {
+        destroy_image(&out_material->diffuse);
+        spdlog::error(
+            "Engine::create_material_from_file: failed to allocate descriptor set: res = {}",
+            static_cast<int>(res)
+        );
+        return false;
+    }
+
+    VkDescriptorImageInfo image_info{
+        .sampler = m_sampler,
+        .imageView = out_material->diffuse.view,
+        .imageLayout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+    };
+
+    VkWriteDescriptorSet write = {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = out_material->diffuse_set;
+    write.dstBinding = 0;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image_info;
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+    return true;
+}
+
+void Engine::destroy_material(Scene::Material *material)
+{
+    destroy_image(&material->diffuse);
+}
+
 [[nodiscard]] bool Engine::create_scene_from_file(
     [[maybe_unused]] const std::string &path, [[maybe_unused]] Scene *out_scene
 )
@@ -1193,8 +1410,7 @@ void Engine::destroy_mesh(Mesh *mesh)
 
     const aiScene *scene = importer.ReadFile(
         path.c_str(),
-        aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_GenNormals |
-            aiProcess_GenUVCoords
+        aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_FlipUVs
     );
     if (scene == nullptr)
     {
@@ -1206,6 +1422,48 @@ void Engine::destroy_mesh(Mesh *mesh)
     {
         spdlog::error("Engine::create_scene_from_file: file has no root node");
         return false;
+    }
+
+    for (size_t mat_idx = 0; mat_idx < scene->mNumMaterials; ++mat_idx)
+    {
+        Scene::Material material;
+
+        const aiMaterial *ai_material = scene->mMaterials[mat_idx];
+        if (ai_material->GetTextureCount(aiTextureType_DIFFUSE) == 0)
+        {
+            spdlog::warn(
+                "Engine::create_scene_from_file: no diffuse texture for material #{} (`{}`)",
+                mat_idx,
+                ai_material->GetName().C_Str()
+            );
+
+            if (!create_material_from_file("../assets/white.png", &material))
+            {
+                destroy_scene(out_scene);
+                spdlog::error("Engine::create_scene_from_file: failed to create fallback material");
+                return false;
+            }
+        }
+        else
+        {
+            aiString diffuse_name;
+            ai_material->GetTexture(aiTextureType_DIFFUSE, 0, &diffuse_name);
+
+            std::string diffuse_path =
+                std::string("../assets/flight_helmet/") + diffuse_name.C_Str();
+            if (!create_material_from_file(diffuse_path, &material))
+            {
+                destroy_scene(out_scene);
+                spdlog::error(
+                    "Engine::create_scene_from_file: failed to create material #{} (`{}`)",
+                    mat_idx,
+                    ai_material->GetName().C_Str()
+                );
+                return false;
+            }
+        }
+
+        out_scene->materials.emplace_back(material);
     }
 
     for (size_t mesh_idx = 0; mesh_idx < scene->mNumMeshes; ++mesh_idx)
@@ -1247,9 +1505,11 @@ void Engine::destroy_mesh(Mesh *mesh)
         Mesh mesh;
         if (!create_mesh(vertices, indices, &mesh))
         {
-            spdlog::error("Engine::create_scene_from_file: failed to create mesh");
+            destroy_scene(out_scene);
+            spdlog::error("Engine::create_scene_from_file: failed to create mesh #{}", mesh_idx);
             return false;
         }
+        mesh.material_idx = ai_mesh->mMaterialIndex;
         out_scene->meshes.emplace_back(mesh);
     }
 
@@ -1284,7 +1544,13 @@ void Engine::destroy_scene(Scene *scene)
         destroy_mesh(&mesh);
     }
 
+    for (auto &material : scene->materials)
+    {
+        destroy_material(&material);
+    }
+
     scene->meshes.clear();
+    scene->materials.clear();
     scene->objects.clear();
 }
 

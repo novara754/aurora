@@ -45,6 +45,8 @@ struct Mesh
     GPUBuffer vertex_buffer;
     GPUBuffer index_buffer;
     VkDeviceAddress vertex_buffer_address;
+
+    size_t material_idx;
 };
 
 struct Scene
@@ -54,7 +56,14 @@ struct Scene
         size_t mesh_idx;
     };
 
+    struct Material
+    {
+        VkDescriptorSet diffuse_set;
+        GPUImage diffuse;
+    };
+
     std::vector<Mesh> meshes;
+    std::vector<Material> materials;
     std::vector<Object> objects;
 };
 
@@ -135,6 +144,11 @@ class Engine
     std::vector<VkImage> m_swapchain_images;
     std::vector<VkImageView> m_swapchain_image_views;
 
+    VkDescriptorPool m_descriptor_pool;
+
+    GPUImage m_render_target;
+    GPUImage m_depth_target;
+
     VkQueue m_graphics_queue{VK_NULL_HANDLE};
     uint32_t m_graphics_queue_family{0};
 
@@ -142,10 +156,6 @@ class Engine
     std::array<FrameData, NUM_FRAMES_IN_FLIGHT> m_frames;
 
     DeletionQueue m_deletion_queue;
-
-    GPUImage m_render_target;
-    GPUImage m_depth_target;
-
     struct
     {
         VkCommandPool cmd_pool;
@@ -155,11 +165,12 @@ class Engine
 
     bool m_disable_render{false};
 
+    VkDescriptorSetLayout m_forward_set_layout;
     VkPipelineLayout m_forward_pipeline_layout;
     VkPipeline m_forward_pipeline;
 
     Camera m_camera{
-        .eye = {0.0f, 0.0f, 10.0f},
+        .eye = {0.0f, 0.4f, 1.1f},
         .forward = {0.0f, 0.0f, -1.0f},
         .up = {0.0f, 1.0f, 0.0f},
         .fov_y = 70.0f,
@@ -167,9 +178,11 @@ class Engine
         .z_near = 0.1f,
         .z_far = 1000.0f,
     };
-    std::array<float, 3> m_background_color{1.0f, 0.5f, 0.1f};
+    std::array<float, 3> m_background_color{0.1f, 0.1f, 0.1f};
     Scene m_scene;
     float m_scene_rotation{0.0f};
+
+    VkSampler m_sampler;
 
     Engine(const Engine &) = delete;
     Engine &operator=(const Engine &) = delete;
@@ -211,6 +224,7 @@ class Engine
         VmaMemoryUsage memory_usage, VkFormat format, VkExtent3D extent, VkImageUsageFlags usage,
         VkImageAspectFlags aspect_mask, GPUImage *out_image
     );
+    [[nodiscard]] bool create_image_from_file(const std::string &path, GPUImage *out_image);
     void destroy_image(GPUImage *image);
 
     [[nodiscard]] bool create_buffer(
@@ -222,6 +236,10 @@ class Engine
     [[nodiscard]] bool
     create_mesh(std::span<Vertex> vertices, std::span<uint32_t> indices, Mesh *out_mesh);
     void destroy_mesh(Mesh *mesh);
+
+    [[nodiscard]] bool
+    create_material_from_file(const std::string &diffuse_path, Scene::Material *out_material);
+    void destroy_material(Scene::Material *material);
 
     [[nodiscard]] bool create_scene_from_file(const std::string &path, Scene *out_scene);
     void destroy_scene(Scene *scene);

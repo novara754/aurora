@@ -11,6 +11,7 @@ set(SDL_SHARED OFF)
 
 set(BUILD_SHARED_LIBS OFF)
 set(ASSIMP_NO_EXPORT ON)
+set(ASSIMP_BUILD_TESTS OFF)
 set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF)
 set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF)
 set(ASSIMP_BUILD_GLTF_IMPORTER ON)
@@ -79,6 +80,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(assimp)
 
+FetchContent_Declare(
+        stb
+        SYSTEM
+        GIT_REPOSITORY "https://github.com/nothings/stb"
+        GIT_TAG "2e2bef463a5b53ddf8bb788e25da6b8506314c08"
+)
+FetchContent_MakeAvailable(stb)
+
 find_package(Vulkan REQUIRED)
 find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
 
@@ -123,7 +132,9 @@ add_executable(aurora
         src/read_file.cpp
         src/vma_impl.cpp
         src/tiny_obj_loader_impl.cpp
+        src/stbi_impl.cpp
 )
+
 target_compile_options(aurora PRIVATE
         -Wall
         -Werror
@@ -131,6 +142,12 @@ target_compile_options(aurora PRIVATE
         -Wpedantic
 )
 
+target_compile_definitions(aurora PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+        GLM_FORCE_EXPLICIT_CTOR
+)
+
+target_include_directories(aurora PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(aurora PRIVATE spdlog::spdlog)
 target_link_libraries(aurora PRIVATE SDL3::SDL3-static)
 target_link_libraries(aurora PRIVATE Vulkan::Vulkan)
@@ -151,5 +168,5 @@ compile_shader(aurora
 
 add_custom_command(
         TARGET aurora POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_LIST_DIR}/meshes" "${CMAKE_CURRENT_BINARY_DIR}/meshes"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_LIST_DIR}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets"
 )
