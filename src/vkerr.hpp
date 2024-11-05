@@ -1,5 +1,7 @@
 #pragma once
 
+#include <spdlog/spdlog.h>
+
 #define VKERR(x, msg)                                                                              \
     if (VkResult result = (x); result != VK_SUCCESS)                                               \
     {                                                                                              \

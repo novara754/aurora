@@ -128,7 +128,10 @@ target_link_libraries(imgui PRIVATE Vulkan::Vulkan)
 
 add_executable(aurora
         src/main.cpp
+        src/app.cpp
         src/engine.cpp
+        src/forward_pass.cpp
+        src/imgui_pass.cpp
         src/read_file.cpp
         src/vma_impl.cpp
         src/tiny_obj_loader_impl.cpp

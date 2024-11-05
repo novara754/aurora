@@ -3,7 +3,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "engine.hpp"
+#include "app.hpp"
 
 int main()
 {
@@ -30,22 +30,26 @@ int main()
 
     try
     {
-        Engine engine(window);
-        if (!engine.init())
+        App app(window);
+        if (app.init())
         {
-            spdlog::error("main: failed to initialize engine");
+            spdlog::trace("main: initialized app");
+            spdlog::trace("main: running app");
+            app.run();
+            spdlog::trace("main: app has exitted");
         }
         else
         {
-            spdlog::trace("main: initialized engine");
-            spdlog::trace("main: running engine");
-            engine.run();
-            spdlog::trace("main: engine has exitted");
+            spdlog::error("main: failed to initialize app");
         }
     }
     catch (const std::exception &e)
     {
-        spdlog::error("main: engine threw exception: {}", e.what());
+        spdlog::error("main: app threw exception: {}", e.what());
+    }
+    catch (...)
+    {
+        spdlog::error("main: app threw unknown exception");
     }
 
     SDL_DestroyWindow(window);
