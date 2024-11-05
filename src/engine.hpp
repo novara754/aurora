@@ -134,6 +134,9 @@ class Engine
 {
     static constexpr size_t NUM_FRAMES_IN_FLIGHT = 2;
 
+    double m_last_frame_time{0.0};
+    double m_delta_time{0.0};
+
     SDL_Window *m_window;
 
     VkInstance m_instance{VK_NULL_HANDLE};

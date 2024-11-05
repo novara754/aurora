@@ -923,13 +923,23 @@ void Engine::draw_imgui(VkCommandBuffer cmd_buffer, VkImageView swapchain_image_
 void Engine::build_ui()
 {
     ImGui::Begin(
+        "Statistics",
+        nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize
+    );
+    {
+        ImGui::Text("Frame Time (sec): %f", m_delta_time / 1000.0);
+    }
+    ImGui::End();
+
+    ImGui::Begin(
         "Settings",
         nullptr,
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize
     );
     {
         ImGui::SeparatorText("General");
-        ImGui::ColorEdit3("Color", m_background_color.data());
+        ImGui::ColorEdit3("Background", m_background_color.data());
         ImGui::SeparatorText("Camera");
         ImGui::DragFloat3("Position", glm::value_ptr(m_camera.eye), 0.1f);
         ImGui::SliderFloat("Pitch", &m_camera.rotation.x, -90.0f, 90.0f);
@@ -941,8 +951,13 @@ void Engine::build_ui()
 void Engine::run()
 {
     spdlog::trace("Engine::run: entering main loop");
+    m_last_frame_time = SDL_GetTicks();
     while (true)
     {
+        double now = SDL_GetTicks();
+        m_delta_time = now - m_last_frame_time;
+        m_last_frame_time = now;
+
         SDL_Event event;
         if (SDL_PollEvent(&event))
         {
