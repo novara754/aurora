@@ -345,10 +345,10 @@ bool Engine::init()
     }
 
     {
-        if (!create_scene_from_file("../assets/flight_helmet/FlightHelmet.gltf", &m_scene))
+        if (!create_scene_from_file("../assets/sponza/sponza.gltf", &m_scene))
         {
             destroy_scene(&m_scene);
-            spdlog::error("Engine::init: failed to load flight helmet scene");
+            spdlog::error("Engine::init: failed to load scene");
             return false;
         }
         m_deletion_queue.add([&] { destroy_scene(&m_scene); });
@@ -1449,8 +1449,7 @@ void Engine::destroy_material(Scene::Material *material)
             aiString diffuse_name;
             ai_material->GetTexture(aiTextureType_DIFFUSE, 0, &diffuse_name);
 
-            std::string diffuse_path =
-                std::string("../assets/flight_helmet/") + diffuse_name.C_Str();
+            std::string diffuse_path = std::string("../assets/sponza/") + diffuse_name.C_Str();
             if (!create_material_from_file(diffuse_path, &material))
             {
                 destroy_scene(out_scene);
@@ -1524,15 +1523,15 @@ void Engine::destroy_material(Scene::Material *material)
             nodes_to_process.emplace_back(node->mChildren[i]);
         }
 
-        if (node->mNumMeshes == 0)
+        for (unsigned int i = 0; i < node->mNumMeshes; ++i)
         {
-            continue;
+            out_scene->objects.emplace_back(Scene::Object{
+                .mesh_idx = node->mMeshes[i],
+            });
         }
-
-        out_scene->objects.emplace_back(Scene::Object{
-            .mesh_idx = node->mMeshes[0],
-        });
     }
+
+    spdlog::debug("scene has {} objects", out_scene->objects.size());
 
     return true;
 }

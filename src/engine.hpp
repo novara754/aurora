@@ -176,7 +176,7 @@ class Engine
         .fov_y = 70.0f,
         .aspect = 16.0f / 9.0f,
         .z_near = 0.1f,
-        .z_far = 1000.0f,
+        .z_far = 10000.0f,
     };
     std::array<float, 3> m_background_color{0.1f, 0.1f, 0.1f};
     Scene m_scene;
