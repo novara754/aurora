@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <functional>
+#include <glm/trigonometric.hpp>
 #include <span>
 #include <string>
 
@@ -101,14 +103,13 @@ struct FrameData
 struct ForwardPushConstants
 {
     glm::mat4 camera;
-    glm::mat4 model;
     VkDeviceAddress vertex_buffer_address;
 };
 
 struct Camera
 {
     glm::vec3 eye;
-    glm::vec3 forward;
+    glm::vec3 rotation;
     glm::vec3 up;
     float fov_y;
     float aspect;
@@ -117,7 +118,13 @@ struct Camera
 
     [[nodiscard]] glm::mat4 get_matrix() const
     {
-        glm::mat4 view = glm::lookAtRH(this->eye, this->eye + this->forward, this->up);
+        glm::vec3 forward(
+            std::cos(glm::radians(this->rotation.x)) * std::cos(glm::radians(this->rotation.y)),
+            std::sin(glm::radians(this->rotation.x)),
+            std::cos(glm::radians(this->rotation.x)) * std::sin(glm::radians(this->rotation.y))
+        );
+
+        glm::mat4 view = glm::lookAtRH(this->eye, this->eye + forward, this->up);
         glm::mat4 proj = glm::perspectiveRH(this->fov_y, this->aspect, this->z_near, this->z_far);
         return proj * view;
     }
@@ -170,8 +177,8 @@ class Engine
     VkPipeline m_forward_pipeline;
 
     Camera m_camera{
-        .eye = {0.0f, 0.4f, 1.1f},
-        .forward = {0.0f, 0.0f, -1.0f},
+        .eye = {-820.0f, 145.0f, -0.0f},
+        .rotation = {14.0f, 0.0f, 0.0f},
         .up = {0.0f, 1.0f, 0.0f},
         .fov_y = 70.0f,
         .aspect = 16.0f / 9.0f,
@@ -180,7 +187,6 @@ class Engine
     };
     std::array<float, 3> m_background_color{0.1f, 0.1f, 0.1f};
     Scene m_scene;
-    float m_scene_rotation{0.0f};
 
     VkSampler m_sampler;
 

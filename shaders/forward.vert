@@ -20,14 +20,13 @@ layout (buffer_reference, std430) readonly buffer VertexBuffer
 layout (push_constant) uniform PushConstants
 {
 	mat4 camera;
-	mat4 model;
 	VertexBuffer vertex_buffer;
 } constants;
 
 void main()
 {
 	Vertex vertex = constants.vertex_buffer.vertices[gl_VertexIndex];
-	gl_Position = constants.camera * constants.model * vec4(vertex.position, 1.0);
+	gl_Position = constants.camera * vec4(vertex.position, 1.0);
 	tex_coords = vec2(vertex.tex_coord_x, vertex.tex_coord_y);
 	normal = vertex.normal;
 }

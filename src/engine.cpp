@@ -741,11 +741,6 @@ void Engine::draw_frame(VkCommandBuffer cmd_buffer)
 
         ForwardPushConstants push_constants{
             .camera = m_camera.get_matrix(),
-            .model = glm::rotate(
-                glm::mat4(1.0f),
-                glm::radians(m_scene_rotation),
-                glm::vec3(0.0f, 1.0f, 0.0f)
-            ),
             .vertex_buffer_address = mesh.vertex_buffer_address,
         };
         vkCmdBindDescriptorSets(
@@ -935,11 +930,10 @@ void Engine::build_ui()
     {
         ImGui::SeparatorText("General");
         ImGui::ColorEdit3("Color", m_background_color.data());
-        ImGui::SeparatorText("Scene");
-        ImGui::SliderFloat("Rotation", &m_scene_rotation, -180.0f, 180.0f);
         ImGui::SeparatorText("Camera");
         ImGui::DragFloat3("Position", glm::value_ptr(m_camera.eye), 0.1f);
-        ImGui::DragFloat3("Forward", glm::value_ptr(m_camera.forward), 0.1f);
+        ImGui::SliderFloat("Pitch", &m_camera.rotation.x, -90.0f, 90.0f);
+        ImGui::SliderFloat("Yaw", &m_camera.rotation.y, -180.0f, 180.0f);
     }
     ImGui::End();
 }
